@@ -1,0 +1,71 @@
+# 生产环境配置 - 包含 Nginx 反向代理
+version: '3.8'
+
+services:
+  # MuseTalk 主服务
+  musetalk:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: musetalk_prod
+    image: musetalk:prod
+
+    # 生产环境不暴露端口，通过 Nginx 代理
+    expose:
+      - "8000"
+
+    volumes:
+      - ./models:/app/models:ro
+      - ./core_data:/app/core_data
+      # 生产环境不挂载源码
+
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CUDA_VISIBLE_DEVICES=0
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    restart: always  # 生产环境总是重启
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/docs"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+    networks:
+      - musetalk_network
+
+  # Nginx 反向代理
+  nginx:
+    image: nginx:alpine
+    container_name: musetalk_nginx
+
+    ports:
+      - "80:80"
+      - "443:443"
+
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro  # SSL 证书
+      - ./logs/nginx:/var/log/nginx
+
+    depends_on:
+      - musetalk
+
+    restart: always
+
+    networks:
+      - musetalk_network
+
+networks:
+  musetalk_network:
+    driver: bridge

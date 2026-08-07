@@ -5,37 +5,41 @@ setlocal
 set CheckpointsDir=models
 
 :: Create necessary directories
-mkdir %CheckpointsDir%\musetalk
-mkdir %CheckpointsDir%\musetalkV15
-mkdir %CheckpointsDir%\syncnet
-mkdir %CheckpointsDir%\dwpose
-mkdir %CheckpointsDir%\face-parse-bisent
-mkdir %CheckpointsDir%\sd-vae-ft-mse
-mkdir %CheckpointsDir%\whisper
+mkdir %CheckpointsDir%\musetalk 2>nul
+mkdir %CheckpointsDir%\musetalkV15 2>nul
+mkdir %CheckpointsDir%\syncnet 2>nul
+mkdir %CheckpointsDir%\dwpose 2>nul
+mkdir %CheckpointsDir%\face-parse-bisent 2>nul
+mkdir %CheckpointsDir%\sd-vae 2>nul
+mkdir %CheckpointsDir%\whisper 2>nul
 
 :: Install required packages
-pip install -U "huggingface_hub[hf_xet]"
+pip install -U "huggingface_hub[cli]"
 
 :: Set HuggingFace endpoint
 set HF_ENDPOINT=https://hf-mirror.com
 
-:: Download MuseTalk weights
-hf download TMElyralab/MuseTalk --local-dir %CheckpointsDir%
+echo Downloading MuseTalk v1.0 weights...
+hf download TMElyralab/MuseTalk --local-dir %CheckpointsDir%\musetalk --include "musetalk/musetalk.json" "musetalk/pytorch_model.bin"
 
-:: Download SD VAE weights
+echo Downloading MuseTalk v1.5 weights...
+hf download TMElyralab/MuseTalk --local-dir %CheckpointsDir%\musetalkV15 --include "musetalkV15/musetalk.json" "musetalkV15/unet.pth"
+
+echo Downloading SD VAE weights...
 hf download stabilityai/sd-vae-ft-mse --local-dir %CheckpointsDir%\sd-vae --include "config.json" "diffusion_pytorch_model.bin"
 
-:: Download Whisper weights
+echo Downloading Whisper weights...
 hf download openai/whisper-tiny --local-dir %CheckpointsDir%\whisper --include "config.json" "pytorch_model.bin" "preprocessor_config.json"
 
-:: Download DWPose weights
+echo Downloading DWPose weights...
 hf download yzd-v/DWPose --local-dir %CheckpointsDir%\dwpose --include "dw-ll_ucoco_384.pth"
 
-:: Download SyncNet weights
+echo Downloading SyncNet weights...
 hf download ByteDance/LatentSync --local-dir %CheckpointsDir%\syncnet --include "latentsync_syncnet.pt"
 
-:: Download face-parse-bisent weights
+echo Downloading Face Parse Bisent weights...
 hf download ManyOtherFunctions/face-parse-bisent --local-dir %CheckpointsDir%\face-parse-bisent --include "79999_iter.pth" "resnet18-5c106cde.pth"
 
-echo All weights have been downloaded successfully!
+echo.
+echo ✅ All weights have been downloaded successfully!
 endlocal 

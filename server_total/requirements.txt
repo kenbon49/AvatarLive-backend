@@ -1,0 +1,6 @@
+fastapi>=0.110,<1
+uvicorn[standard]>=0.27,<1
+httpx>=0.27,<1
+openai>=1.0,<3
+pydantic>=2.7,<3
+websockets>=12,<16

@@ -1,0 +1,78 @@
+version: '3.8'
+
+services:
+  # MuseTalk 主服务
+  musetalk:
+    # 构建配置
+    build:
+      context: .                    # 构建上下文目录（Dockerfile 所在位置）
+      dockerfile: Dockerfile        # Dockerfile 文件名
+      args:                         # 构建时的参数
+        - HTTP_PROXY=${HTTP_PROXY}  # 可选：代理配置
+
+    # 容器名称（自定义，方便识别）
+    container_name: musetalk_server
+
+    # 镜像名称和标签
+    image: musetalk:latest
+
+    # 端口映射：宿主机端口:容器端口
+    ports:
+      - "8000:8000"                 # API 服务端口
+
+    # 卷挂载：持久化数据和模型
+    volumes:
+      # 模型权重目录（只读，避免误修改）
+      - ./models:/app/models:ro
+
+      # 数据目录（读写）
+      - ./core_data:/app/core_data
+
+      # 代码热更新（开发模式，生产环境删除）
+      - ./server.py:/app/server.py
+      - ./musetalk:/app/musetalk
+      - ./infer.py:/app/infer.py
+      - ./musetalk_infer.py:/app/musetalk_infer.py
+      - ./rmbg.py:/app/rmbg.py
+
+    # 环境变量
+    environment:
+      - PYTHONUNBUFFERED=1          # Python 输出不缓冲
+      - CUDA_VISIBLE_DEVICES=0      # 指定使用的 GPU
+      - HF_ENDPOINT=https://hf-mirror.com  # HuggingFace 镜像
+
+    # GPU 支持（需要 nvidia-docker）
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1              # 使用 1 个 GPU
+              capabilities: [gpu]
+
+    # 重启策略
+    restart: unless-stopped         # 容器退出时自动重启（除非手动停止）
+
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/docs"]
+      interval: 30s                 # 每 30 秒检查一次
+      timeout: 10s                  # 超时时间
+      retries: 3                    # 重试次数
+      start_period: 60s             # 启动后等待 60 秒再开始检查
+
+    # 日志配置
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"            # 单个日志文件最大 100MB
+        max-file: "3"               # 保留最近 3 个日志文件
+
+    # 网络配置
+    networks:
+      - musetalk_network
+
+# 网络定义
+networks:
+  musetalk_network:
+    driver: bridge                  # 桥接网络模式

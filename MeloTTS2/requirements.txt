@@ -1,0 +1,16 @@
+torch==2.3.1
+transformers==4.40.2
+onnx==1.16.2
+onnxruntime-gpu==1.17.1
+# ONNX Runtime 1.17 uses NumPy's 1.x C ABI.
+numpy==1.26.4
+soundfile
+scipy>=1.10,<2
+tqdm
+numba
+cn2an==0.5.22
+pypinyin==0.50.0
+jieba==0.42.1
+inflect==7.0.0
+fastapi>=0.110,<1
+uvicorn[standard]>=0.27,<1

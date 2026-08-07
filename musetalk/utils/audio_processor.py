@@ -36,23 +36,23 @@ class AudioProcessor:
 
     def get_whisper_chunk(
         self,
-        whisper_input_features,
+        whisper_input_features,    # 裁剪后的30s 梅尔频谱特征列表 
         device,
         weight_dtype,
-        whisper,
-        librosa_length,
+        whisper,                   # Whisper 模型
+        librosa_length,              # 原始音频长度，单位采样点
         fps=25,
-        audio_padding_length_left=2,
-        audio_padding_length_right=2,
+        audio_padding_length_left=2,  # 左侧音频填充长度，单位秒（保证视频帧之间的连续新）
+        audio_padding_length_right=2,  # 右侧音频填充长度，单位秒
     ):
-        audio_feature_length_per_frame = 2 * (audio_padding_length_left + audio_padding_length_right + 1)
+        audio_feature_length_per_frame = 2 * (audio_padding_length_left + audio_padding_length_right + 1) #可以查看whisper的梅尔特征帧来计算
         whisper_feature = []
         # Process multiple 30s mel input features
         for input_feature in whisper_input_features:
             input_feature = input_feature.to(device).to(weight_dtype)
-            audio_feats = whisper.encoder(input_feature, output_hidden_states=True).hidden_states
-            audio_feats = torch.stack(audio_feats, dim=2)
-            whisper_feature.append(audio_feats)
+            audio_feats = whisper.encoder(input_feature, output_hidden_states=True).hidden_states # 12层隐藏状态
+            audio_feats = torch.stack(audio_feats, dim=2) # 合并所有层的隐藏状态
+            whisper_feature.append(audio_feats) 
 
         whisper_feature = torch.cat(whisper_feature, dim=1)
         # Trim the last segment to remove padding
@@ -62,7 +62,7 @@ class AudioProcessor:
         whisper_idx_multiplier = audio_fps / fps
         num_frames = math.floor((librosa_length / sr) * fps)
         actual_length = math.floor((librosa_length / sr) * audio_fps)
-        whisper_feature = whisper_feature[:,:actual_length,...]
+        whisper_feature = whisper_feature[:,:actual_length,...]  # 去掉填充部分的音频特征
 
         # Calculate padding amount
         padding_nums = math.ceil(whisper_idx_multiplier)
@@ -72,12 +72,12 @@ class AudioProcessor:
             whisper_feature,
             # Add extra padding to prevent out of bounds
             torch.zeros_like(whisper_feature[:, :padding_nums * 3 * audio_padding_length_right])
-        ], 1)
+        ], 1)   #填充空音频特征
 
         audio_prompts = []
         for frame_index in range(num_frames):
             try:
-                audio_index = math.floor(frame_index * whisper_idx_multiplier)
+                audio_index = math.floor(frame_index * whisper_idx_multiplier)    # 计算当前视频帧对应的音频索引
                 audio_clip = whisper_feature[:, audio_index: audio_index + audio_feature_length_per_frame]
                 assert audio_clip.shape[1] == audio_feature_length_per_frame
                 audio_prompts.append(audio_clip)

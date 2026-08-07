@@ -1,0 +1,141 @@
+# 开发环境配置 - 支持代码热更新
+services:
+  musetalk-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: musetalk_dev
+    image: musetalk:latest
+
+    ports:
+      - "8083:8083"
+      - "5678:5678"  # Python debugger 端口
+
+    # 开发模式：挂载所有源码，支持热更新
+    volumes:
+      - ./models:/app/models:ro
+      - ./core_data:/app/core_data
+      - ./cache:/root/.cache  # 挂载torch/huggingface缓存，避免重复下载
+      - .:/app  # 挂载整个项目目录
+
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CUDA_VISIBLE_DEVICES=0
+      - MUSETALK_BACKEND=${MUSETALK_BACKEND:-onnx}
+      - MUSETALK_FPS=${MUSETALK_FPS:-16}
+      - MUSETALK_BATCH_SIZE=${MUSETALK_BATCH_SIZE:-4}
+      - MUSETALK_ONNX_DIR=/app/models/onnx_batch4
+      - DEBUG=1  # 开发模式标志
+
+    # 开发模式使用命令行启动，方便调试
+    command: python3 -u -m accelerated.server --host 0.0.0.0 --port 8083
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    # 开发模式不自动重启，方便调试
+    restart: "no"
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8083/readiness | grep -q '\"status\":\"ready\"'"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 300s
+
+    networks:
+      - musetalk_network
+
+  # MeloTTS 与 MuseTalk 共享 GPU；启动预热会把中文声学模型和 BERT 常驻显存。
+  melotts-dev:
+    build:
+      context: ./MeloTTS2
+      dockerfile: Dockerfile
+
+    container_name: melotts_dev
+    image: melotts2:dev
+
+    ports:
+      - "8084:8084"
+
+    volumes:
+      - ./MeloTTS2:/app
+
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TRANSFORMERS_OFFLINE=1
+      - CUDA_VISIBLE_DEVICES=0
+      - MELOTTS_DEVICE=${MELOTTS_DEVICE:-cuda:0}
+      - MELOTTS_DEFAULT_LANGUAGE=${MELOTTS_DEFAULT_LANGUAGE:-ZH}
+      - MELOTTS_WARMUP_TEXT=${MELOTTS_WARMUP_TEXT:-你好。}
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    command: uvicorn server:app --host 0.0.0.0 --port 8084
+    restart: "no"
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8084/health | grep -q '\"gpu_ready\":true'"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
+
+    networks:
+      - musetalk_network
+
+  # 轻量网关负责 LLM -> MeloTTS -> MuseTalk，不加载推理模型。
+  server-total-dev:
+    build:
+      context: .
+      dockerfile: server_total/Dockerfile
+
+    container_name: server_total_dev
+    image: musetalk-server-total:dev
+
+    ports:
+      - "8080:8080"
+
+    volumes:
+      - ./server_total:/app/server_total
+      - ./llm_inference:/app/llm_inference
+
+    # 直接复用已通过独立测试的 LiteLLM 配置。
+    env_file:
+      - ./llm_inference/.env
+
+    environment:
+      - PYTHONUNBUFFERED=1
+      - MELOTTS_URL=http://melotts-dev:8084
+      - MUSETALK_WS_URL=ws://musetalk-dev:8083/v1/stream
+      - MUSETALK_BACKEND=onnx
+      - PIPELINE_REQUEST_TIMEOUT=${PIPELINE_REQUEST_TIMEOUT:-300}
+      - PIPELINE_FIRST_UNIT_MIN_CHARS=${PIPELINE_FIRST_UNIT_MIN_CHARS:-12}
+      - PIPELINE_TARGET_UNIT_CHARS=${PIPELINE_TARGET_UNIT_CHARS:-20}
+
+    command: uvicorn server_total.app:app --host 0.0.0.0 --port 8080 --reload
+    depends_on:
+      musetalk-dev:
+        condition: service_healthy
+      melotts-dev:
+        condition: service_healthy
+    restart: "no"
+
+    networks:
+      - musetalk_network
+
+networks:
+  musetalk_network:
+    driver: bridge

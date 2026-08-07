@@ -16,3 +16,17 @@ ffplay*
 debug
 exp_out
 .gradio
+.env
+**/.env
+
+core_data/*
+doc/*
+models/*
+data/*
+!data/public/
+data/public/*
+!data/public/*.mp4
+cache/
+MeloTTS2/bert_model/
+MeloTTS2/pretrained_model/
+MeloTTS2/onnx_models/

@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# 虚拟环境
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Docker
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# 文档
+*.md
+doc/
+docs/
+
+# 数据和模型（这些应该通过卷挂载）
+core_data/
+models/
+data/output/
+*.pth
+*.ckpt
+*.safetensors
+
+# 日志
+*.log
+logs/
+
+# 测试
+tests/
+test_*.py
+*_test.py
+.pytest_cache/
+
+# 临时文件
+*.tmp
+*.bak
+*.swp
+.DS_Store
+Thumbs.db
+
+# 环境配置
+.env
+.env.local

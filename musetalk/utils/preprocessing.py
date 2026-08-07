@@ -1,5 +1,4 @@
 import sys
-from face_detection import FaceAlignment,LandmarksType
 from os import listdir, path
 import subprocess
 import numpy as np
@@ -17,10 +16,6 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 config_file = './musetalk/utils/dwpose/rtmpose-l_8xb32-270e_coco-ubody-wholebody-384x288.py'
 checkpoint_file = './models/dwpose/dw-ll_ucoco_384.pth'
 model = init_model(config_file, checkpoint_file, device=device)
-
-# initialize the face detection model
-device = "cuda" if torch.cuda.is_available() else "cpu"
-fa = FaceAlignment(LandmarksType._2D, flip_input=False,device=device)
 
 # maker if the bbox is not sufficient 
 coord_placeholder = (0.0,0.0,0.0,0.0)
@@ -58,24 +53,13 @@ def get_bbox_range(img_list,upperbondrange =0):
         keypoints = results.pred_instances.keypoints
         face_land_mark= keypoints[0][23:91]
         face_land_mark = face_land_mark.astype(np.int32)
-        
-        # get bounding boxes by face detetion
-        bbox = fa.get_detections_for_batch(np.asarray(fb))
-        
-        # adjust the bounding box refer to landmark
-        # Add the bounding box to a tuple and append it to the coordinates list
-        for j, f in enumerate(bbox):
-            if f is None: # no face in the image
-                coords_list += [coord_placeholder]
-                continue
-            
-            half_face_coord =  face_land_mark[29]#np.mean([face_land_mark[28], face_land_mark[29]], axis=0)
-            range_minus = (face_land_mark[30]- face_land_mark[29])[1]
-            range_plus = (face_land_mark[29]- face_land_mark[28])[1]
-            average_range_minus.append(range_minus)
-            average_range_plus.append(range_plus)
-            if upperbondrange != 0:
-                half_face_coord[1] = upperbondrange+half_face_coord[1] #手动调整  + 向下（偏29）  - 向上（偏28）
+
+        # 直接基于 mmpose 关键点计算调整范围（不依赖第三方 face_detection/sfd）
+        half_face_coord =  face_land_mark[29]
+        range_minus = (face_land_mark[30]- face_land_mark[29])[1]
+        range_plus = (face_land_mark[29]- face_land_mark[28])[1]
+        average_range_minus.append(range_minus)
+        average_range_plus.append(range_plus)
 
     text_range=f"Total frame:「{len(frames)}」 Manually adjust range : [ -{int(sum(average_range_minus) / len(average_range_minus))}~{int(sum(average_range_plus) / len(average_range_plus))} ] , the current value: {upperbondrange}"
     return text_range
@@ -99,37 +83,27 @@ def get_landmark_and_bbox(img_list,upperbondrange =0):
         keypoints = results.pred_instances.keypoints
         face_land_mark= keypoints[0][23:91]
         face_land_mark = face_land_mark.astype(np.int32)
-        
-        # get bounding boxes by face detetion
-        bbox = fa.get_detections_for_batch(np.asarray(fb))
-        
-        # adjust the bounding box refer to landmark
-        # Add the bounding box to a tuple and append it to the coordinates list
-        for j, f in enumerate(bbox):
-            if f is None: # no face in the image
-                coords_list += [coord_placeholder]
-                continue
-            
-            half_face_coord =  face_land_mark[29]#np.mean([face_land_mark[28], face_land_mark[29]], axis=0)
-            range_minus = (face_land_mark[30]- face_land_mark[29])[1]
-            range_plus = (face_land_mark[29]- face_land_mark[28])[1]
-            average_range_minus.append(range_minus)
-            average_range_plus.append(range_plus)
-            if upperbondrange != 0:
-                half_face_coord[1] = upperbondrange+half_face_coord[1] #手动调整  + 向下（偏29）  - 向上（偏28）
-            half_face_dist = np.max(face_land_mark[:,1]) - half_face_coord[1]
-            min_upper_bond = 0
-            upper_bond = max(min_upper_bond, half_face_coord[1] - half_face_dist)
-            
-            f_landmark = (np.min(face_land_mark[:, 0]),int(upper_bond),np.max(face_land_mark[:, 0]),np.max(face_land_mark[:,1]))
-            x1, y1, x2, y2 = f_landmark
-            
-            if y2-y1<=0 or x2-x1<=0 or x1<0: # if the landmark bbox is not suitable, reuse the bbox
-                coords_list += [f]
-                w,h = f[2]-f[0], f[3]-f[1]
-                print("error bbox:",f)
-            else:
-                coords_list += [f_landmark]
+
+        # 直接基于 mmpose 关键点计算人脸裁剪框（不依赖第三方 face_detection/sfd）
+        half_face_coord =  face_land_mark[29]#np.mean([face_land_mark[28], face_land_mark[29]], axis=0)
+        range_minus = (face_land_mark[30]- face_land_mark[29])[1]
+        range_plus = (face_land_mark[29]- face_land_mark[28])[1]
+        average_range_minus.append(range_minus)
+        average_range_plus.append(range_plus)
+        if upperbondrange != 0:
+            half_face_coord[1] = upperbondrange+half_face_coord[1] #手动调整  + 向下（偏29）  - 向上（偏28）
+        half_face_dist = np.max(face_land_mark[:,1]) - half_face_coord[1]
+        min_upper_bond = 0
+        upper_bond = max(min_upper_bond, half_face_coord[1] - half_face_dist)
+
+        f_landmark = (np.min(face_land_mark[:, 0]),int(upper_bond),np.max(face_land_mark[:, 0]),np.max(face_land_mark[:,1]))
+        x1, y1, x2, y2 = f_landmark
+
+        if y2-y1<=0 or x2-x1<=0 or x1<0: # 关键点计算的框无效
+            coords_list += [coord_placeholder]
+            print("error bbox:", f_landmark)
+        else:
+            coords_list += [f_landmark]
     
     print("********************************************bbox_shift parameter adjustment**********************************************************")
     print(f"Total frame:「{len(frames)}」 Manually adjust range : [ -{int(sum(average_range_minus) / len(average_range_minus))}~{int(sum(average_range_plus) / len(average_range_plus))} ] , the current value: {upperbondrange}")

@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MuseTalk Live</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Archivo+Black&family=Noto+Sans+SC:wght@400;600;800&display=swap');
+    :root { --ink:#101410; --paper:#f3efd9; --signal:#ff542e; --acid:#d7ff45; --line:3px; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; color:var(--ink); font-family:'Noto Sans SC',sans-serif;
+      background:radial-gradient(circle at 85% 15%,#ffd5c5 0 12%,transparent 13%),
+      repeating-linear-gradient(135deg,transparent 0 28px,rgba(16,20,16,.055) 29px 31px),var(--paper); }
+    main { width:min(1180px,94vw); margin:0 auto; padding:40px 0 56px; display:grid; grid-template-columns:1.2fr .8fr; gap:28px; }
+    h1 { font-family:'Archivo Black',sans-serif; font-size:clamp(48px,8vw,105px); line-height:.82; margin:0 0 26px; letter-spacing:-.07em; text-transform:uppercase; }
+    h1 span { color:var(--signal); -webkit-text-stroke:2px var(--ink); }
+    .stage { border:var(--line) solid var(--ink); background:#111; box-shadow:12px 12px 0 var(--ink); min-height:520px; display:grid; place-items:center; overflow:hidden; position:relative; }
+    canvas { width:100%; height:100%; object-fit:contain; }
+    .badge { position:absolute; top:16px; left:16px; color:var(--ink); background:var(--acid); border:2px solid var(--ink); padding:7px 11px; font-weight:800; letter-spacing:.08em; }
+    .panel { align-self:end; border:var(--line) solid var(--ink); background:#fffdf1; padding:24px; box-shadow:8px 8px 0 var(--signal); }
+    label { display:block; font-weight:800; margin:18px 0 7px; }
+    select,input::file-selector-button,button { font:inherit; font-weight:800; }
+    select,input { width:100%; border:2px solid var(--ink); background:white; padding:12px; }
+    button { width:100%; margin-top:22px; border:3px solid var(--ink); background:var(--acid); padding:15px; cursor:pointer; box-shadow:5px 5px 0 var(--ink); }
+    button:active { transform:translate(3px,3px); box-shadow:2px 2px 0 var(--ink); }
+    button:disabled { filter:grayscale(1); cursor:wait; }
+    #status { min-height:72px; margin:20px 0 0; padding:12px; background:var(--ink); color:#fff; font-family:monospace; white-space:pre-wrap; }
+    .protocol { font-size:13px; line-height:1.65; opacity:.72; }
+    @media (max-width:800px) { main { grid-template-columns:1fr; padding-top:24px; } .stage { min-height:58vh; } h1{font-size:56px;} }
+  </style>
+</head>
+<body>
+<main>
+  <section>
+    <h1>Muse<span>Talk</span><br>Live</h1>
+    <div class="stage"><div class="badge">LIVE / STREAM</div><canvas id="screen"></canvas></div>
+  </section>
+  <aside class="panel">
+    <h2>流式数字人控制台</h2>
+    <p>上传一段音频，服务端会逐批返回带时间戳的画面和原始音频。默认使用 Chinese 形象。</p>
+    <label for="avatar">数字人形象</label>
+    <select id="avatar"><option value="chinese" selected>Chinese（默认）</option><option value="business_male_1">商务男1</option></select>
+    <label for="audio">驱动音频</label>
+    <input id="audio" type="file" accept="audio/*">
+    <button id="run">开始实时播报</button>
+    <div id="status">正在连接服务…</div>
+    <p class="protocol">输入：16 kHz / 单声道 / PCM s16le。输出：MSTK 二进制包（PCM + JPEG），时间戳单位为微秒。</p>
+  </aside>
+</main>
+<script>
+const statusEl=document.querySelector('#status'), run=document.querySelector('#run'), canvas=document.querySelector('#screen'), ctx=canvas.getContext('2d');
+let ws, audioContext, audioBase=0, wallBase=0, playbackStarted=false;
+const playbackBufferSeconds=1.5;
+const setStatus=(s)=>statusEl.textContent=s;
+
+function connect(){
+  const scheme=location.protocol==='https:'?'wss':'ws';
+  ws=new WebSocket(`${scheme}://${location.host}/v1/stream`); ws.binaryType='arraybuffer';
+  ws.onopen=()=>setStatus('已连接；等待服务就绪…');
+  ws.onclose=()=>{setStatus('连接已关闭，2 秒后重连…'); setTimeout(connect,2000)};
+  ws.onmessage=async(event)=>{
+    if(typeof event.data==='string'){
+      const msg=JSON.parse(event.data); setStatus(`${msg.type}${msg.message?'：'+msg.message:''}`);
+      if(msg.type==='ready') run.disabled=false;
+      if(msg.type==='stream_start'){ playbackStarted=false; }
+      if(msg.type==='stream_end'){ run.disabled=false; setStatus(`播报完成，共 ${msg.packets} 个媒体包`); }
+      return;
+    }
+    const view=new DataView(event.data); if(view.byteLength<24) return;
+    const magic=String.fromCharCode(...new Uint8Array(event.data,0,4)); if(magic!=='MSTK') return;
+    const type=view.getUint8(5), pts=Number(view.getBigUint64(16,true))/1e6, payload=event.data.slice(24);
+    // Start the playback clock at the first media packet, not stream_start. The first
+    // inference batch can take seconds and would otherwise consume the whole buffer.
+    if(!playbackStarted){
+      audioBase=audioContext.currentTime+playbackBufferSeconds-pts;
+      wallBase=performance.now()+playbackBufferSeconds*1000-pts*1000;
+      playbackStarted=true;
+    }
+    if(type===2){
+      const samples=new Int16Array(payload), buffer=audioContext.createBuffer(1,samples.length,16000), channel=buffer.getChannelData(0);
+      for(let i=0;i<samples.length;i++) channel[i]=samples[i]/32768;
+      const source=audioContext.createBufferSource(); source.buffer=buffer; source.connect(audioContext.destination); source.start(Math.max(audioContext.currentTime,audioBase+pts));
+    } else if(type===1){
+      const bitmap=await createImageBitmap(new Blob([payload],{type:'image/jpeg'}));
+      const delay=Math.max(0,wallBase+pts*1000-performance.now());
+      setTimeout(()=>{ if(canvas.width!==bitmap.width){canvas.width=bitmap.width;canvas.height=bitmap.height} ctx.drawImage(bitmap,0,0);bitmap.close(); },delay);
+    }
+  };
+}
+
+async function audioToPcm(file){
+  audioContext ||= new AudioContext(); await audioContext.resume();
+  const decoded=await audioContext.decodeAudioData(await file.arrayBuffer());
+  const duration=decoded.duration, length=Math.floor(duration*16000), offline=new OfflineAudioContext(1,length,16000);
+  const source=offline.createBufferSource(); source.buffer=decoded; source.connect(offline.destination); source.start();
+  const mono=(await offline.startRendering()).getChannelData(0), pcm=new Int16Array(mono.length);
+  for(let i=0;i<mono.length;i++) pcm[i]=Math.max(-32768,Math.min(32767,Math.round(mono[i]*32768)));
+  return pcm;
+}
+
+run.disabled=true; run.onclick=async()=>{
+  const file=document.querySelector('#audio').files[0]; if(!file){setStatus('请先选择音频文件');return}
+  run.disabled=true; setStatus('正在解码并重采样音频…');
+  try{
+    const pcm=await audioToPcm(file); ws.send(JSON.stringify({type:'start',profile:document.querySelector('#avatar').value}));
+    const bytes=new Uint8Array(pcm.buffer); for(let p=0;p<bytes.length;p+=65536) ws.send(bytes.slice(p,p+65536));
+    ws.send(JSON.stringify({type:'commit'})); setStatus(`已提交 ${(pcm.length/16000).toFixed(2)} 秒音频`);
+  }catch(error){run.disabled=false;setStatus(`失败：${error.message}`)}
+};
+connect();
+</script>
+</body>
+</html>
