@@ -17,7 +17,11 @@ from accelerated.streaming import (
 class FakeEngine:
     batch_size = 2
 
+    def __init__(self):
+        self.feature_inputs = []
+
     def extract_audio_features(self, pcm16k, fps):
+        self.feature_inputs.append(pcm16k.copy())
         count = int(len(pcm16k) / 16000 * fps)
         return np.zeros((count, 50, 384), dtype=np.float32)
 
@@ -60,12 +64,15 @@ class StreamingTests(unittest.TestCase):
 
     def test_renderer_yields_fixed_batches_and_matching_audio(self):
         profile = make_profile()
-        renderer = StreamingRenderer(FakeEngine(), fps=25)
+        engine = FakeEngine()
+        renderer = StreamingRenderer(engine, fps=25)
         pcm = np.zeros(4 * 640, dtype="<i2").tobytes()
         batches = list(renderer.render(pcm, profile))
         self.assertEqual([len(batch.frames) for batch in batches], [2, 2])
         self.assertEqual([len(batch.pcm16) for batch in batches], [2 * 640 * 2, 2 * 640 * 2])
         self.assertEqual([batch.start_frame for batch in batches], [0, 2])
+        self.assertEqual(len(engine.feature_inputs), 1)
+        self.assertFalse(np.any(engine.feature_inputs[0]))
 
 
 if __name__ == "__main__":

@@ -82,19 +82,9 @@ WS   ws://localhost:8080/v1/conversation
 {"type":"cancel","request_id":"对应的请求ID"}
 ```
 
-需要让数字人在提问前、回答生成期间以及回答后持续出画面时，连接就绪后开启静息流：
-
-```json
-{"type":"idle_start","profile":"chinese"}
-```
-
-服务会循环把 16 kHz 静音 PCM 送入 MuseTalk。首段回答音频就绪后会自动切走静息流，
-回答生成完毕后再自动恢复；`cancel` 只取消当前回答，不会关闭已经启用的静息流。显式结束
-长期会话时可发送 `{"type":"idle_stop"}`，随后关闭 WebSocket。
-
-默认每次生成 1 秒静息媒体，并把服务端提前量限制在 1.5 秒，避免长时间待机使浏览器积压
-大量定时器和图像帧。可分别通过 `PIPELINE_IDLE_CHUNK_SECONDS`、
-`PIPELINE_IDLE_MAX_AHEAD_SECONDS` 和 `PIPELINE_IDLE_RETRY_SECONDS` 调整分段、提前量及异常重试间隔。
+连接本身不会触发 MuseTalk 推理。前端在未提问和回答播放完毕后显示所选源视频的首帧，
+只有发送 `ask` 或 `speak` 后才会把真实语音提交给 MuseTalk 并接收流式媒体。服务不接受
+`idle_start` / `idle_stop`，也不会用静音 PCM 生成静息画面。
 
 ## 流式事件
 
@@ -156,10 +146,11 @@ LLM 原始增量：
 
 - 包类型 `1`：JPEG 视频帧。
 - 包类型 `2`：16 kHz 单声道 PCM s16le。
-- 包序号在整条 WebSocket 会话内连续递增。
-- PTS 单位为微秒，并在静息段、回答的所有标点单元以及回答后的静息段之间保持连续。
+- 包序号在一轮回答内连续递增。
+- PTS 单位为微秒，并在一轮回答的所有标点单元之间保持连续；下一轮回答从 0 重新开始。
 
-MuseTalk 内部每次提交仍会从序号和 PTS 0 开始，`server_total` 会在转发前重写包头。前端必须按包头 PTS 调度媒体，不能在每个 `stream_start` 或回答开始时重置会话播放时间轴。
+MuseTalk 内部每个文本单元仍会从序号和 PTS 0 开始，`server_total` 会在转发前重写包头。
+前端按包头 PTS 调度本轮媒体，并在回答播放结束后切回静态首帧。
 
 ## 背压与并发
 

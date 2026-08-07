@@ -133,7 +133,6 @@ class MuseTalkEngine:
         self.backend = backend
         self.onnx_dir = Path(onnx_dir or Path(model_root) / "models/onnx").resolve()
         self._prepared: dict[FrameKey, PreparedFrame] = {}
-        self._neutral_frames: dict[FrameKey, RGBFrame] = {}
         self._lock = threading.RLock()
         self._load_models()
 
@@ -304,22 +303,6 @@ class MuseTalkEngine:
             }
             merged.update(prepared)
             self._prepared = merged
-
-    def _install_neutral_frames(
-        self,
-        profile_id: str,
-        neutral: dict[FrameKey, RGBFrame],
-    ) -> None:
-        if any(key[0] != profile_id for key in neutral):
-            raise MuseTalkSetupError("neutral frame profile does not match the batch")
-        with self._lock:
-            merged = {
-                key: value
-                for key, value in self._neutral_frames.items()
-                if key[0] != profile_id
-            }
-            merged.update(neutral)
-            self._neutral_frames = merged
 
     def _resolve_cache_path(self, cache_path: str | Path | None) -> Path:
         if cache_path is None:
@@ -716,41 +699,3 @@ class MuseTalkEngine:
         elapsed = time.perf_counter() - started
         log.info("MuseTalk Whisper/UNet/VAE warm-up complete in %.3fs", elapsed)
         return elapsed
-
-    def prepare_neutral_frames(self, frames: Iterable[Any], fps: float) -> None:
-        """Pre-render silent action frames so idle/preview clips do not mouth words."""
-
-        source_frames = list(frames)
-        if not source_frames:
-            raise MuseTalkSetupError("action runtime contains no frames")
-        profile_id = self._single_profile_id(source_frames)
-        neutral: dict[FrameKey, RGBFrame] = {}
-        started = time.perf_counter()
-        samples_per_frame = 16_000 / float(fps)
-        silent_pcm = np.zeros(
-            math.ceil(len(source_frames) * samples_per_frame),
-            dtype=np.float32,
-        )
-        silent_features = self.extract_audio_features(silent_pcm, fps)
-        if len(silent_features) < len(source_frames):
-            raise MuseTalkSetupError("silence feature extraction returned too few frames")
-        for start in range(0, len(source_frames), self.batch_size):
-            batch = source_frames[start : start + self.batch_size]
-            prompts = silent_features[start : start + len(batch)]
-            rendered = self.render_batch(prompts, batch)
-            for frame, output in zip(batch, rendered):
-                output.setflags(write=False)
-                neutral[self._frame_key(frame)] = output
-        self._install_neutral_frames(profile_id, neutral)
-        log.info(
-            "prepared %s neutral action frames in %.3fs",
-            len(neutral),
-            time.perf_counter() - started,
-        )
-
-    def neutral_frame(self, frame: Any) -> RGBFrame:
-        """Return a pre-rendered silent frame, falling back to the source frame."""
-
-        key = self._frame_key(frame)
-        with self._lock:
-            return self._neutral_frames.get(key, frame.frame)

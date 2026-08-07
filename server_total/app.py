@@ -9,7 +9,7 @@ import json
 import logging
 import os
 import time
-from typing import Any, Awaitable, Callable, Literal
+from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -34,11 +34,7 @@ SENTENCE_QUEUE_SIZE = int(os.getenv("PIPELINE_TEXT_QUEUE_SIZE", "4"))
 AUDIO_QUEUE_SIZE = int(os.getenv("PIPELINE_AUDIO_QUEUE_SIZE", "2"))
 FIRST_UNIT_MIN_CHARS = int(os.getenv("PIPELINE_FIRST_UNIT_MIN_CHARS", "12"))
 TARGET_UNIT_CHARS = int(os.getenv("PIPELINE_TARGET_UNIT_CHARS", "20"))
-IDLE_CHUNK_SECONDS = float(os.getenv("PIPELINE_IDLE_CHUNK_SECONDS", "1.0"))
-IDLE_MAX_AHEAD_SECONDS = float(os.getenv("PIPELINE_IDLE_MAX_AHEAD_SECONDS", "1.5"))
-IDLE_RETRY_SECONDS = float(os.getenv("PIPELINE_IDLE_RETRY_SECONDS", "1.0"))
 _END = object()
-IDLE_REQUEST_ID = "idle"
 AvatarProfile = Literal[
     "chinese",
     "business_male_1",
@@ -83,18 +79,6 @@ class SpeakRequest(BaseModel):
     speed: float = Field(default=1.0, gt=0.25, le=3.0)
 
 
-class IdleStartRequest(BaseModel):
-    type: Literal["idle_start"]
-    profile: AvatarProfile = DEFAULT_AVATAR_PROFILE
-    language: Literal["ZH", "EN"] = "ZH"
-    speaker: str | None = None
-    speed: float = Field(default=1.0, gt=0.25, le=3.0)
-
-
-class IdleStopRequest(BaseModel):
-    type: Literal["idle_stop"]
-
-
 @dataclass(frozen=True)
 class AudioUnit:
     unit: TextUnit
@@ -105,23 +89,10 @@ class AudioUnit:
 
 @dataclass
 class MediaTimeline:
-    """Shared conversation-wide PTS/sequence so idle and answer chunks are seamless."""
+    """PTS and packet sequence shared by all media units in one response."""
 
     pts_offset_us: int = 0
     sequence: int = 0
-    playback_started_at: float | None = None
-
-    async def wait_for_idle_budget(self, duration_us: int) -> None:
-        """Bound generated idle media so the browser queue cannot grow forever."""
-
-        now = time.perf_counter()
-        if self.playback_started_at is None:
-            self.playback_started_at = now
-        buffered_end = (self.pts_offset_us + duration_us) / 1_000_000
-        elapsed = now - self.playback_started_at
-        delay = buffered_end - elapsed - max(0.0, IDLE_MAX_AHEAD_SECONDS)
-        if delay > 0:
-            await asyncio.sleep(delay)
 
 
 class FrontendSender:
@@ -303,7 +274,7 @@ async def _synthesize_units(
 async def _handshake_upstream(
     upstream: Any,
     sender: FrontendSender,
-    request: AskRequest | SpeakRequest | IdleStartRequest,
+    request: AskRequest | SpeakRequest,
     request_id: str,
 ) -> float:
     """Wait for MuseTalk readiness, validate the backend, and report to the frontend."""
@@ -339,11 +310,9 @@ async def _render_units(
     audio_queue: asyncio.Queue[AudioUnit | object],
     *,
     timeline: MediaTimeline | None = None,
-    on_first_audio: Callable[[], Awaitable[None]] | None = None,
 ) -> int:
     timeline = timeline if timeline is not None else MediaTimeline()
     rendered = 0
-    first_unit = True
     async with websockets.connect(
         MUSETALK_WS_URL,
         open_timeout=REQUEST_TIMEOUT,
@@ -359,9 +328,6 @@ async def _render_units(
                 break
             if not isinstance(item, AudioUnit):
                 raise TypeError("audio queue received an invalid item")
-            if first_unit and on_first_audio is not None:
-                await on_first_audio()
-                first_unit = False
             unit = item.unit
             await sender.send_json(
                 {
@@ -439,84 +405,10 @@ async def _render_units(
     return rendered
 
 
-async def _run_idle(
-    sender: FrontendSender,
-    request: IdleStartRequest,
-    request_id: str,
-    timeline: MediaTimeline,
-) -> None:
-    """Keep the avatar playing by continuously rendering silent audio through MuseTalk."""
-    async with websockets.connect(
-        MUSETALK_WS_URL,
-        open_timeout=REQUEST_TIMEOUT,
-        close_timeout=5,
-        ping_timeout=None,
-        max_size=None,
-    ) as upstream:
-        fps = await _handshake_upstream(upstream, sender, request, request_id)
-        await sender.send_json(
-            {
-                "type": "idle_started",
-                "request_id": request_id,
-                "profile": request.profile,
-                "fps": fps,
-                "sample_rate": 16000,
-            }
-        )
-        frame_duration_us = round(1_000_000 / fps)
-        silence = b"\x00\x00" * int(IDLE_CHUNK_SECONDS * 16000)
-        silence_duration_us = round(len(silence) / 2 / 16000 * 1_000_000)
-        while True:
-            chunk_max_pts = 0
-            packet_count = 0
-            await timeline.wait_for_idle_budget(silence_duration_us)
-            await sender.send_json(
-                {
-                    "type": "idle_chunk",
-                    "request_id": request_id,
-                    "seconds": round(len(silence) / 2 / 16000, 3),
-                }
-            )
-            await upstream.send(json.dumps({"type": "start", "profile": request.profile}))
-            for offset in range(0, len(silence), PCM_CHUNK_BYTES):
-                await upstream.send(silence[offset : offset + PCM_CHUNK_BYTES])
-            await upstream.send(json.dumps({"type": "commit"}))
-            try:
-                while True:
-                    message = await asyncio.wait_for(upstream.recv(), timeout=REQUEST_TIMEOUT)
-                    if isinstance(message, bytes):
-                        outgoing, _packet_type, pts_us = remap_media_packet(
-                            message,
-                            sequence=timeline.sequence,
-                            pts_offset_us=timeline.pts_offset_us,
-                        )
-                        chunk_max_pts = max(chunk_max_pts, pts_us - timeline.pts_offset_us)
-                        timeline.sequence += 1
-                        packet_count += 1
-                        await sender.send_bytes(outgoing)
-                        continue
-                    control = json.loads(message)
-                    if control.get("type") == "error":
-                        raise RuntimeError(control.get("message", "MuseTalk idle stream failed"))
-                    control.update({"request_id": request_id})
-                    await sender.send_json(control)
-                    if control.get("type") == "stream_end":
-                        break
-            except asyncio.CancelledError:
-                if packet_count:
-                    timeline.pts_offset_us += chunk_max_pts + frame_duration_us
-                raise
-            timeline.pts_offset_us += max(
-                silence_duration_us, chunk_max_pts + frame_duration_us
-            )
-
-
 async def run_pipeline(
     websocket: WebSocket | FrontendSender,
     request: AskRequest | SpeakRequest,
     request_id: str | None = None,
-    *,
-    session: "ConversationSession | None" = None,
 ) -> None:
     sender = websocket if isinstance(websocket, FrontendSender) else FrontendSender(websocket)
     resolved_request_id = request_id or request.request_id or uuid4().hex
@@ -537,9 +429,6 @@ async def run_pipeline(
     if kind == "ask":
         await sender.send_json({"type": "llm_start", "request_id": resolved_request_id})
 
-    timeline = session.timeline if session is not None else None
-    on_first_audio = session.stop_idle if session is not None else None
-
     tasks = [
         asyncio.create_task(
             _produce_text_units(sender, request, resolved_request_id, text_queue, kind=kind)
@@ -559,8 +448,6 @@ async def run_pipeline(
                 request,
                 resolved_request_id,
                 audio_queue,
-                timeline=timeline,
-                on_first_audio=on_first_audio,
             )
         ),
     ]
@@ -585,73 +472,14 @@ async def run_pipeline(
     )
 
 
-class ConversationSession:
-    """Per-connection live state shared by idle and question tasks."""
-
-    def __init__(self, sender: FrontendSender) -> None:
-        self.sender = sender
-        self.timeline = MediaTimeline()
-        self.idle_enabled = False
-        self.idle_task: asyncio.Task[None] | None = None
-
-    async def start_idle(self, request: IdleStartRequest) -> None:
-        await self.stop_idle()
-        self.idle_task = asyncio.create_task(
-            self._supervise_idle(request)
-        )
-        self.idle_task.add_done_callback(self._on_idle_done)
-
-    async def _supervise_idle(self, request: IdleStartRequest) -> None:
-        while self.idle_enabled:
-            try:
-                await _run_idle(self.sender, request, IDLE_REQUEST_ID, self.timeline)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                log.exception("idle stream failed; retrying")
-                await self.sender.send_json(
-                    {
-                        "type": "idle_error",
-                        "request_id": IDLE_REQUEST_ID,
-                        "message": str(exc),
-                        "retry_seconds": IDLE_RETRY_SECONDS,
-                    }
-                )
-                await asyncio.sleep(max(0.0, IDLE_RETRY_SECONDS))
-
-    async def stop_idle(self) -> None:
-        task, self.idle_task = self.idle_task, None
-        if task is not None:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-
-    async def resume_idle(self, request: IdleStartRequest | None) -> None:
-        if self.idle_enabled and request is not None:
-            task = self.idle_task
-            if task is None or task.done():
-                await self.start_idle(request)
-
-    def _on_idle_done(self, task: asyncio.Task[None]) -> None:
-        if task.cancelled():
-            return
-        error = task.exception()
-        if error is not None:
-            log.error("idle stream task failed: %s", error)
-
-
 async def _run_and_report(
     sender: FrontendSender,
     request: AskRequest | SpeakRequest,
     request_id: str,
-    *,
-    session: ConversationSession | None = None,
-    resume_request: IdleStartRequest | None = None,
 ) -> None:
-    cancelled = False
     try:
-        await run_pipeline(sender, request, request_id, session=session)
+        await run_pipeline(sender, request, request_id)
     except asyncio.CancelledError:
-        cancelled = True
         raise
     except LLMInferenceError as exc:
         log.error("LLM request failed: %s", exc)
@@ -708,16 +536,10 @@ async def _run_and_report(
                 "cancelled": False,
             }
         )
-    finally:
-        if not cancelled and session is not None and resume_request is not None:
-            await session.resume_idle(resume_request)
-
-
 @app.websocket("/v1/conversation")
 async def conversation(websocket: WebSocket) -> None:
     await websocket.accept()
     sender = FrontendSender(websocket)
-    session = ConversationSession(sender)
     await sender.send_json(
         {
             "type": "ready",
@@ -730,7 +552,6 @@ async def conversation(websocket: WebSocket) -> None:
     )
     active_task: asyncio.Task[None] | None = None
     active_request_id: str | None = None
-    idle_request: IdleStartRequest | None = None
     try:
         while True:
             payload = await websocket.receive_json()
@@ -740,27 +561,6 @@ async def conversation(websocket: WebSocket) -> None:
                 active_request_id = None
 
             message_type = payload.get("type")
-
-            if message_type == "idle_start":
-                try:
-                    idle_start = IdleStartRequest.model_validate(payload)
-                except ValidationError as exc:
-                    await sender.send_json(
-                        {"type": "error", "stage": "request", "message": str(exc)}
-                    )
-                    continue
-                session.idle_enabled = True
-                idle_request = idle_start
-                if active_task is None or active_task.done():
-                    await session.start_idle(idle_start)
-                continue
-
-            if message_type == "idle_stop":
-                session.idle_enabled = False
-                idle_request = None
-                await session.stop_idle()
-                await sender.send_json({"type": "idle_stopped"})
-                continue
 
             if message_type == "cancel":
                 try:
@@ -793,7 +593,6 @@ async def conversation(websocket: WebSocket) -> None:
                 )
                 active_task = None
                 active_request_id = None
-                await session.resume_idle(idle_request)
                 continue
 
             if message_type == "ask":
@@ -838,15 +637,12 @@ async def conversation(websocket: WebSocket) -> None:
                     sender,
                     request,
                     active_request_id,
-                    session=session,
-                    resume_request=idle_request,
                 )
             )
     except WebSocketDisconnect:
         if active_task is not None:
             active_task.cancel()
             await asyncio.gather(active_task, return_exceptions=True)
-        await session.stop_idle()
 
 
 if __name__ == "__main__":

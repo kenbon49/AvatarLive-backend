@@ -11,10 +11,7 @@ from pydantic import ValidationError
 from server_total.app import (
     AVATAR_CATALOG,
     AskRequest,
-    IdleStartRequest,
-    MediaTimeline,
     _render_units,
-    _run_idle,
     avatars,
     conversation,
     run_pipeline,
@@ -50,14 +47,6 @@ class FakeConversationSocket(FakeFrontend):
             raise WebSocketDisconnect from exc
 
 
-class YieldingConversationSocket(FakeConversationSocket):
-    """Let background idle tasks make progress between control messages."""
-
-    async def receive_json(self):
-        await asyncio.sleep(0.05)
-        return await super().receive_json()
-
-
 class FakeUpstream:
     def __init__(self, messages) -> None:
         self.messages = iter(messages)
@@ -74,21 +63,6 @@ class FakeUpstream:
 
     async def send(self, value):
         self.sent.append(value)
-
-
-class CyclingUpstream(FakeUpstream):
-    """Replay a fixed message list forever, yielding to the event loop each recv."""
-
-    def __init__(self, messages) -> None:
-        self.messages = list(messages)
-        self.sent = []
-        self.index = 0
-
-    async def recv(self):
-        await asyncio.sleep(0)
-        message = self.messages[self.index % len(self.messages)]
-        self.index += 1
-        return message
 
 
 class FakeHttpResponse:
@@ -290,71 +264,14 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(cancelled), 1)
         self.assertEqual(cancelled[0]["request_id"], "request-3")
 
-    async def test_conversation_streams_idle_until_idle_stop(self):
-        upstream = CyclingUpstream(
-            [
-                '{"type":"ready","fps":25,"backend":"onnx"}',
-                '{"type":"started","profile":"chinese"}',
-                '{"type":"queued","profile":"chinese"}',
-                '{"type":"stream_start"}',
-                media_packet(4, 0, b"idle"),
-                '{"type":"stream_end","packets":1}',
-            ]
-        )
-        websocket = YieldingConversationSocket(
-            [
-                {"type": "idle_start"},
-                {"type": "idle_stop"},
-            ]
-        )
-        with patch("server_total.app.websockets.connect", return_value=upstream):
+    async def test_idle_messages_do_not_start_musetalk_inference(self):
+        websocket = FakeConversationSocket([{"type": "idle_start", "profile": "chinese"}])
+        with patch("server_total.app.websockets.connect") as connect:
             await conversation(websocket)
 
-        types = [item["type"] for item in websocket.json_messages]
-        self.assertIn("idle_started", types)
-        self.assertIn("idle_stopped", types)
-        starts = [item for item in upstream.sent if isinstance(item, str) and '"start"' in item]
-        self.assertGreaterEqual(len(starts), 1)
-        self.assertIn('"profile": "chinese"', starts[0])
-
-    async def test_idle_renderer_streams_silence_until_cancelled(self):
-        upstream = CyclingUpstream(
-            [
-                '{"type":"ready","fps":25,"backend":"onnx"}',
-                '{"type":"started","profile":"chinese"}',
-                '{"type":"queued","profile":"chinese"}',
-                '{"type":"stream_start"}',
-                media_packet(4, 0, b"idle"),
-                '{"type":"stream_end","packets":1}',
-            ]
-        )
-        frontend = FakeFrontend()
-        timeline = MediaTimeline()
-        with patch("server_total.app.websockets.connect", return_value=upstream):
-            task = asyncio.create_task(
-                _run_idle(frontend, IdleStartRequest(type="idle_start"), "idle", timeline)
-            )
-            await asyncio.sleep(0.05)
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-
-        types = [item["type"] for item in frontend.json_messages]
-        self.assertIn("idle_started", types)
-        self.assertGreaterEqual(types.count("idle_chunk"), 1)
-        self.assertTrue(any(isinstance(item, bytes) for item in frontend.binary_messages))
-        self.assertGreater(timeline.sequence, 0)
-
-    async def test_idle_timeline_limits_media_generated_ahead_of_playback(self):
-        timeline = MediaTimeline(pts_offset_us=2_000_000, playback_started_at=99.0)
-        delay = AsyncMock()
-        with (
-            patch("server_total.app.IDLE_MAX_AHEAD_SECONDS", 1.5),
-            patch("server_total.app.time.perf_counter", return_value=100.0),
-            patch("server_total.app.asyncio.sleep", delay),
-        ):
-            await timeline.wait_for_idle_budget(1_000_000)
-
-        delay.assert_awaited_once_with(0.5)
+        connect.assert_not_called()
+        error = next(item for item in websocket.json_messages if item.get("type") == "error")
+        self.assertIn("unknown message type", error["message"])
 
     def test_remap_media_packet_rewrites_sequence_and_pts(self):
         packet = media_packet(99, 25_000, b"jpeg")
