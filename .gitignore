@@ -20,6 +20,7 @@ exp_out
 **/.env
 .claude/
 .tmp-*/
+gradio_demo/
 
 core_data/*
 doc/*
