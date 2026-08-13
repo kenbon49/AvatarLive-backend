@@ -25,9 +25,10 @@ from .segmenter import PunctuationSegmenter, TextUnit
 
 log = logging.getLogger("server-total")
 MELOTTS_URL = os.getenv("MELOTTS_URL", "http://localhost:8084").rstrip("/")
-MELOTTS_BERT_BACKEND = "onnx"
+MELOTTS_BERT_BACKEND = "pytorch"
 MUSETALK_WS_URL = os.getenv("MUSETALK_WS_URL", "ws://localhost:8083/v1/stream")
-MUSETALK_BACKEND = os.getenv("MUSETALK_BACKEND", "onnx").strip().lower()
+MUSETALK_BACKEND = "torch"
+MUSETALK_INFERENCE_DTYPE = "float32"
 REQUEST_TIMEOUT = float(os.getenv("PIPELINE_REQUEST_TIMEOUT", "300"))
 PCM_CHUNK_BYTES = 64 * 1024
 SENTENCE_QUEUE_SIZE = int(os.getenv("PIPELINE_TEXT_QUEUE_SIZE", "4"))
@@ -38,19 +39,13 @@ _END = object()
 AvatarProfile = Literal[
     "chinese",
     "business_male_1",
-    "casual_male",
-    "middle_aged_male",
-    "casual_conversation",
-    "casual_female",
+    "chen_yu",
 ]
 DEFAULT_AVATAR_PROFILE: AvatarProfile = "chinese"
 AVATAR_CATALOG = (
     {"id": "chinese", "name": "Chinese", "default": True},
-    {"id": "business_male_1", "name": "商务男1", "default": False},
-    {"id": "casual_male", "name": "休闲风", "default": False},
-    {"id": "middle_aged_male", "name": "中年", "default": False},
-    {"id": "casual_conversation", "name": "休闲交流", "default": False},
-    {"id": "casual_female", "name": "休闲女", "default": False},
+    {"id": "business_male_1", "name": "商务男", "default": False},
+    {"id": "chen_yu", "name": "陈屿", "default": False},
 )
 
 
@@ -84,7 +79,6 @@ class AudioUnit:
     unit: TextUnit
     pcm: bytes
     duration: float
-    elapsed_ms: int
 
 
 @dataclass
@@ -142,6 +136,7 @@ async def health() -> dict[str, object]:
         "melotts_bert_backend": MELOTTS_BERT_BACKEND,
         "musetalk_ws_url": MUSETALK_WS_URL,
         "musetalk_backend": MUSETALK_BACKEND,
+        "musetalk_inference_dtype": MUSETALK_INFERENCE_DTYPE,
         "default_avatar": DEFAULT_AVATAR_PROFILE,
         "avatars": AVATAR_CATALOG,
     }
@@ -265,7 +260,7 @@ async def _synthesize_units(
                 "elapsed_ms": elapsed_ms,
             }
         )
-        await audio_queue.put(AudioUnit(item, pcm, duration, elapsed_ms))
+        await audio_queue.put(AudioUnit(item, pcm, duration))
         count += 1
     await audio_queue.put(_END)
     return count
@@ -276,7 +271,7 @@ async def _handshake_upstream(
     sender: FrontendSender,
     request: AskRequest | SpeakRequest,
     request_id: str,
-) -> float:
+) -> None:
     """Wait for MuseTalk readiness, validate the backend, and report to the frontend."""
     initial_raw = await asyncio.wait_for(upstream.recv(), timeout=REQUEST_TIMEOUT)
     if not isinstance(initial_raw, str):
@@ -290,6 +285,12 @@ async def _handshake_upstream(
             f"MuseTalk backend mismatch: expected {MUSETALK_BACKEND}, "
             f"got {upstream_backend or 'unknown'}"
         )
+    upstream_dtype = str(initial.get("inference_dtype", "")).lower()
+    if upstream_dtype != MUSETALK_INFERENCE_DTYPE:
+        raise RuntimeError(
+            f"MuseTalk dtype mismatch: expected {MUSETALK_INFERENCE_DTYPE}, "
+            f"got {upstream_dtype or 'unknown'}"
+        )
     await sender.send_json(
         {
             "type": "musetalk_ready",
@@ -298,9 +299,9 @@ async def _handshake_upstream(
             "fps": initial.get("fps", 25),
             "sample_rate": 16000,
             "backend": upstream_backend,
+            "inference_dtype": upstream_dtype,
         }
     )
-    return float(initial.get("fps", 25))
 
 
 async def _render_units(
@@ -339,7 +340,17 @@ async def _render_units(
                     "pts_us": timeline.pts_offset_us,
                 }
             )
-            await upstream.send(json.dumps({"type": "start", "profile": request.profile}))
+            await upstream.send(
+                json.dumps(
+                    {
+                        "type": "start",
+                        "profile": request.profile,
+                        # A multi-sentence answer shares one upstream connection.
+                        # Continue its action sequence after the first sentence.
+                        "continue_from_previous": unit.seq > 0,
+                    }
+                )
+            )
             for offset in range(0, len(item.pcm), PCM_CHUNK_BYTES):
                 await upstream.send(item.pcm[offset : offset + PCM_CHUNK_BYTES])
             await upstream.send(json.dumps({"type": "commit"}))

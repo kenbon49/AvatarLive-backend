@@ -49,16 +49,10 @@ def main(args):
     )
     timesteps = torch.tensor([0], device=device)
 
-    # Convert models to half precision if float16 is enabled
-    if args.use_float16:
-        pe = pe.half()
-        vae.vae = vae.vae.half()
-        unet.model = unet.model.half()
-    
     # Move models to specified device
-    pe = pe.to(device)
-    vae.vae = vae.vae.to(device)
-    unet.model = unet.model.to(device)
+    pe = pe.to(device=device, dtype=torch.float32)
+    vae.vae = vae.vae.to(device=device, dtype=torch.float32)
+    unet.model = unet.model.to(device=device, dtype=torch.float32)
         
     # Initialize audio processor and Whisper model
     audio_processor = AudioProcessor(feature_extractor_path=args.whisper_dir)
@@ -267,7 +261,6 @@ if __name__ == "__main__":
     parser.add_argument("--output_vid_name", type=str, default=None, help="Name of output video file")
     parser.add_argument("--use_saved_coord", action="store_true", help='Use saved coordinates to save time')
     parser.add_argument("--saved_coord", action="store_true", help='Save coordinates for future use')
-    parser.add_argument("--use_float16", action="store_true", help="Use float16 for faster inference")
     parser.add_argument("--parsing_mode", default='jaw', help="Face blending parsing mode")
     parser.add_argument("--left_cheek_width", type=int, default=90, help="Width of left cheek region")
     parser.add_argument("--right_cheek_width", type=int, default=90, help="Width of right cheek region")

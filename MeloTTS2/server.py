@@ -27,7 +27,7 @@ class SynthesisRequest(BaseModel):
     speaker: str | None = None
     speed: float = Field(default=1.0, gt=0.25, le=3.0)
     sample_rate: Literal[16000] = 16000
-    bert_backend: Literal["onnx"] = "onnx"
+    bert_backend: Literal["pytorch"] = "pytorch"
 
 
 class ModelRegistry:
@@ -47,11 +47,11 @@ class ModelRegistry:
             model = self._models.get(language)
             if model is None:
                 log.info(
-                    "loading MeloTTS language=%s device=%s bert_backend=onnx",
+                    "loading MeloTTS language=%s device=%s bert_backend=pytorch",
                     language,
                     self.device,
                 )
-                model = TTS(language, device=self.device, bert_backend="onnx")
+                model = TTS(language, device=self.device)
                 self._models[language] = model
         return model
 
@@ -91,9 +91,9 @@ class ModelRegistry:
             for language, tts in self._models.items()
         }
         bert_devices = {
-            language: str(tts.bert.device)
+            language: str(next(tts.bert_model.parameters()).device)
             for language, tts in self._models.items()
-            if tts.bert is not None
+            if tts.bert_model is not None
         }
         bert_backends = {
             language: tts.bert_backend for language, tts in self._models.items()
@@ -124,7 +124,7 @@ registry = ModelRegistry(DEVICE)
 async def lifespan(_app: FastAPI):
     if DEFAULT_LANGUAGE not in {"ZH", "EN"}:
         raise ValueError("MELOTTS_DEFAULT_LANGUAGE must be ZH or EN")
-    # A short synthesis warms both ONNX BERT and the PyTorch acoustic model.
+    # A short synthesis warms both PyTorch BERT and the acoustic model.
     warmup = SynthesisRequest(text=WARMUP_TEXT, language=DEFAULT_LANGUAGE)
     await asyncio.to_thread(registry.synthesize, warmup)
     yield

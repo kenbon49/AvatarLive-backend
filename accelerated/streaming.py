@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import struct
-import threading
 from typing import Iterator, Protocol, Sequence
 
 import cv2
@@ -76,20 +75,22 @@ class StreamingRenderer:
     def __init__(self, engine: RenderEngine, *, fps: float = 25.0) -> None:
         self.engine = engine
         self.fps = float(fps)
-        self._positions: dict[str, int] = {}
-        self._position_lock = threading.Lock()
 
-    def render(self, pcm16le: bytes, profile: AvatarProfile) -> Iterator[RenderedBatch]:
+    def render(
+        self,
+        pcm16le: bytes,
+        profile: AvatarProfile,
+        *,
+        start_position: int = 0,
+    ) -> Iterator[RenderedBatch]:
         pcm = pcm16le_to_float32(pcm16le)
         features = self.engine.extract_audio_features(pcm, self.fps)
         frame_count = len(features)
         if frame_count == 0:
             return
-        with self._position_lock:
-            start_position = self._positions.get(profile.spec.profile_id, 0)
-            self._positions[profile.spec.profile_id] = (
-                start_position + frame_count
-            ) % profile.cycle_length
+        # The caller owns playback position. Keeping it on this shared renderer made
+        # a new request inherit frames from a previous user's request.
+        start_position %= profile.cycle_length
         samples_per_frame = 16000.0 / self.fps
         for start in range(0, frame_count, self.engine.batch_size):
             count = min(self.engine.batch_size, frame_count - start)
@@ -108,4 +109,3 @@ def jpeg_bytes(frame_rgb: NDArray[np.uint8], quality: int = 85) -> bytes:
     if not ok:
         raise RuntimeError("OpenCV failed to encode an output frame")
     return encoded.tobytes()
-

@@ -38,9 +38,5 @@ python-multipart>=0.0.9,<1
 pydantic>=2.7,<3
 websockets>=12,<16
 
-# ONNX export and CUDA inference (1.17.x is the CUDA 11.8 build used here).
-onnx==1.16.2
-onnxruntime-gpu==1.17.1
-
 # torch/torchvision and mmcv/mmdet/mmpose are installed in Dockerfile so their
 # builds match CUDA 11.8. bitsandbytes and lws are optional training features.

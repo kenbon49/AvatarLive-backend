@@ -61,3 +61,15 @@ for delta in client.stream_answer_text("太阳为什么会发光？"):
 默认系统提示词位于 `prompts.py`。它要求模型使用通俗语言、先给结论、通常只回答
 2 到 4 句话，并输出 `{"answer":"..."}`。客户端还会解析、校验和清理结果，保证
 调用方总是得到只有 `answer` 字段的字典；`answer_question_text` 可直接用于 TTS。
+
+## 真实服务测试与计时
+
+同时验证普通调用、流式调用和响应时间：
+
+```powershell
+python scripts/test_llm_inference.py
+```
+
+测试问题直接配置在脚本顶部的 `TEST_QUESTION`。将 `STREAM_RESPONSE` 设为 `True`
+时测试流式回复，设为 `False` 时测试普通回复。脚本会显示首字延迟、总耗时和流式
+分块数量；请求失败时以退出码 `1` 结束。

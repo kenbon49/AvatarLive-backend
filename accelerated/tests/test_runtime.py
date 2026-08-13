@@ -16,20 +16,15 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(
             list(runtime.avatar_specs),
-            [
-                "chinese",
-                "business_male_1",
-                "casual_male",
-                "middle_aged_male",
-                "casual_conversation",
-                "casual_female",
-            ],
+            ["chinese", "business_male_1", "chen_yu"],
         )
         for profile_id, filename in PUBLIC_AVATAR_FILES.items():
             self.assertEqual(
                 runtime.avatar_specs[profile_id].video_path,
                 root / "data" / "public" / filename,
             )
+            # Public avatars must include the video's first decoded frame.
+            self.assertEqual(runtime.avatar_specs[profile_id].clip_start_seconds, 0.0)
 
     @patch("accelerated.runtime.MuseTalkEngine")
     def test_initialize_prepares_and_warms_every_public_avatar(self, engine_class):
@@ -48,25 +43,11 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(
             [call.args[0] for call in get_profile.call_args_list],
-            [
-                "chinese",
-                "business_male_1",
-                "casual_male",
-                "middle_aged_male",
-                "casual_conversation",
-                "casual_female",
-            ],
+            ["chinese", "business_male_1", "chen_yu"],
         )
         self.assertEqual(
             [call.args[0] for call in engine_class.return_value.warm_up.call_args_list],
-            [
-                ["chinese"],
-                ["business_male_1"],
-                ["casual_male"],
-                ["middle_aged_male"],
-                ["casual_conversation"],
-                ["casual_female"],
-            ],
+            [["chinese"], ["business_male_1"], ["chen_yu"]],
         )
         self.assertTrue(runtime.ready)
 

@@ -208,38 +208,10 @@ def distribute_phone(phone_count, token_count):
     for index in range(phone_count):
         counts[index % token_count] += 1
     return counts
-def g2p_old(text):
-    tokenized = tokenizer.tokenize(text)
-    # import pdb; pdb.set_trace()
-    phones = []
-    tones = []
-    words = re.split(r"([,;.\-\?\!\s+])", text)
-    for w in words:
-        if w.upper() in eng_dict:
-            phns, tns = refine_syllables(eng_dict[w.upper()])
-            phones += phns
-            tones += tns
-        else:
-            phone_list = list(filter(lambda p: p != " ", g2p_oov(w)))
-            for ph in phone_list:
-                if ph in arpa:
-                    ph, tn = refine_ph(ph)
-                    phones.append(ph)
-                    tones.append(tn)
-                else:
-                    phones.append(ph)
-                    tones.append(0)
-    # todo: implement word2ph
-    word2ph = [1 for i in phones]
-
-    phones = [post_replace_ph(i) for i in phones]
-    return phones, tones, word2ph
-
 def g2p(text, pad_start_end=True, tokenized=None):
     if tokenized is None:
         tokenized = tokenizer.tokenize(text)
     # import pdb; pdb.set_trace()
-    phs = []
     ph_groups = []
     for t in tokenized:
         if not t.startswith("#"):

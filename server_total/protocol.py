@@ -7,7 +7,6 @@ import struct
 
 PACKET_MAGIC = b"MSTK"
 PACKET_VERSION = 1
-PACKET_PCM16 = 2
 PACKET_HEADER = struct.Struct("<4sBBHIIQ")
 
 

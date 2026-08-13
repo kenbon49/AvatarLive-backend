@@ -22,10 +22,8 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - CUDA_VISIBLE_DEVICES=0
-      - MUSETALK_BACKEND=${MUSETALK_BACKEND:-onnx}
-      - MUSETALK_FPS=${MUSETALK_FPS:-16}
+      - MUSETALK_FPS=${MUSETALK_FPS:-25}
       - MUSETALK_BATCH_SIZE=${MUSETALK_BATCH_SIZE:-4}
-      - MUSETALK_ONNX_DIR=/app/models/onnx_batch4
       - DEBUG=1  # 开发模式标志
 
     # 开发模式使用命令行启动，方便调试
@@ -120,7 +118,6 @@ services:
       - PYTHONUNBUFFERED=1
       - MELOTTS_URL=http://melotts-dev:8084
       - MUSETALK_WS_URL=ws://musetalk-dev:8083/v1/stream
-      - MUSETALK_BACKEND=onnx
       - PIPELINE_REQUEST_TIMEOUT=${PIPELINE_REQUEST_TIMEOUT:-300}
       - PIPELINE_FIRST_UNIT_MIN_CHARS=${PIPELINE_FIRST_UNIT_MIN_CHARS:-12}
       - PIPELINE_TARGET_UNIT_CHARS=${PIPELINE_TARGET_UNIT_CHARS:-20}

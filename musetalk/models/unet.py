@@ -30,7 +30,6 @@ class UNet():
     def __init__(self, 
                  unet_config,
                  model_path,
-                 use_float16=False,
                  device=None
         ):
         with open(unet_config, 'r') as f:
@@ -41,10 +40,15 @@ class UNet():
             self.device = device
         else:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        weights = torch.load(model_path) if torch.cuda.is_available() else torch.load(model_path, map_location=self.device)
+        # Load only the original FP32 tensors; no model conversion or reduced-
+        # precision checkpoint is used.
+        weights = torch.load(
+            model_path,
+            map_location="cpu",
+            weights_only=True,
+        )
         self.model.load_state_dict(weights)
-        if use_float16:
-            self.model = self.model.half()
+        del weights
         self.model.to(self.device)
     
 if __name__ == "__main__":

@@ -82,6 +82,9 @@ def create_app(config: RuntimeConfig | None = None) -> FastAPI:
 
         profile_id = runtime.config.default_avatar
         audio = bytearray()
+        # Playback position belongs to this WebSocket session, never the shared
+        # renderer. A fresh start therefore always begins at the source first frame.
+        profile_positions: dict[str, int] = {}
         max_audio_bytes = 16000 * 2 * 120
         try:
             await websocket.send_json(
@@ -91,7 +94,8 @@ def create_app(config: RuntimeConfig | None = None) -> FastAPI:
                     "sample_rate": 16000,
                     "audio_format": "pcm_s16le_mono",
                     "fps": runtime.config.fps,
-                    "backend": runtime.config.backend,
+                    "backend": "torch",
+                    "inference_dtype": runtime.engine.inference_dtype,
                     "packet_header": "<4sBBHIIQ",
                 }
             )
@@ -115,6 +119,8 @@ def create_app(config: RuntimeConfig | None = None) -> FastAPI:
                     if requested not in runtime.avatar_specs:
                         raise ValueError(f"unknown avatar: {requested}")
                     profile_id = requested
+                    if not bool(control.get("continue_from_previous", False)):
+                        profile_positions[profile_id] = 0
                     audio.clear()
                     await websocket.send_json({"type": "started", "profile": profile_id})
                 elif control_type == "cancel":
@@ -130,8 +136,14 @@ def create_app(config: RuntimeConfig | None = None) -> FastAPI:
                         profile = await asyncio.to_thread(runtime.get_profile, profile_id)
                         if runtime.renderer is None:
                             raise RuntimeError("streaming renderer is unavailable")
-                        iterator = runtime.renderer.render(pcm, profile)
+                        start_position = profile_positions.get(profile_id, 0)
+                        iterator = runtime.renderer.render(
+                            pcm,
+                            profile,
+                            start_position=start_position,
+                        )
                         sequence = 0
+                        rendered_frames = 0
                         await websocket.send_json({"type": "stream_start", "profile": profile_id})
                         pending: asyncio.Task[object] | None = asyncio.create_task(
                             asyncio.to_thread(_next_or_end, iterator)
@@ -142,6 +154,7 @@ def create_app(config: RuntimeConfig | None = None) -> FastAPI:
                                 pending = None
                                 if batch is _END:
                                     break
+                                rendered_frames += len(batch.frames)
                                 # Render the next GPU batch while this batch is encoded and sent.
                                 pending = asyncio.create_task(
                                     asyncio.to_thread(_next_or_end, iterator)
@@ -172,6 +185,9 @@ def create_app(config: RuntimeConfig | None = None) -> FastAPI:
                                 except Exception:
                                     log.exception("prefetched render batch failed during cleanup")
                             iterator.close()
+                            profile_positions[profile_id] = (
+                                start_position + rendered_frames
+                            ) % profile.cycle_length
                         await websocket.send_json(
                             {"type": "stream_end", "packets": sequence, "profile": profile_id}
                         )
@@ -197,19 +213,8 @@ def main() -> None:
     parser.add_argument("--host", default=os.getenv("MUSETALK_HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.getenv("MUSETALK_PORT", "8083")))
     parser.add_argument("--fps", type=float, default=float(os.getenv("MUSETALK_FPS", "25")))
-    parser.add_argument("--height", type=int, default=int(os.getenv("MUSETALK_HEIGHT", "720")))
     parser.add_argument("--batch-size", type=int, default=int(os.getenv("MUSETALK_BATCH_SIZE", "1")))
     parser.add_argument("--device", default=os.getenv("MUSETALK_DEVICE", "cuda:0"))
-    parser.add_argument(
-        "--backend",
-        choices=("torch", "onnx"),
-        default=os.getenv("MUSETALK_BACKEND", "onnx"),
-    )
-    parser.add_argument(
-        "--onnx-dir",
-        type=Path,
-        default=Path(os.getenv("MUSETALK_ONNX_DIR", "models/onnx")),
-    )
     args = parser.parse_args()
 
     import uvicorn
@@ -219,11 +224,8 @@ def main() -> None:
         **{
             **config.__dict__,
             "fps": args.fps,
-            "max_height": args.height,
             "batch_size": args.batch_size,
             "device": args.device,
-            "backend": args.backend,
-            "onnx_dir": args.onnx_dir,
         }
     )
     uvicorn.run(create_app(config), host=args.host, port=args.port, log_level="info")

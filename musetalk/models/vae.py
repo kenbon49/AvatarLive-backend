@@ -12,25 +12,18 @@ class VAE():
     VAE (Variational Autoencoder) class for image processing.
     """
 
-    def __init__(self, model_path="./models/sd-vae-ft-mse/", resized_img=256, use_float16=False):
+    def __init__(self, model_path="./models/sd-vae-ft-mse/", resized_img=256):
         """
         Initialize the VAE instance.
 
         :param model_path: Path to the trained model.
         :param resized_img: The size to which images are resized.
-        :param use_float16: Whether to use float16 precision.
         """
         self.model_path = model_path
         self.vae = AutoencoderKL.from_pretrained(self.model_path)
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.vae.to(self.device)
-
-        if use_float16:
-            self.vae = self.vae.half()
-            self._use_float16 = True
-        else:
-            self._use_float16 = False
 
         self.scaling_factor = self.vae.config.scaling_factor
         self.transform = transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
@@ -123,7 +116,7 @@ class VAE():
 
 if __name__ == "__main__":
     vae_mode_path = "./models/sd-vae-ft-mse/"
-    vae = VAE(model_path = vae_mode_path,use_float16=False)
+    vae = VAE(model_path = vae_mode_path)
     img_path = "./results/sun001_crop/00000.png"
     
     crop_imgs_path = "./results/sun001_crop/"
@@ -143,6 +136,4 @@ if __name__ == "__main__":
         #torch.save(latents,os.path.join(latents_out_path,index+".pt"))
         #reload_tensor = torch.load('tensor.pt')
         #print(reload_tensor.size())
-        
 
-    

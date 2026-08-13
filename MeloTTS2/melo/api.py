@@ -17,7 +17,7 @@ SUPPORTED_LANGUAGES = {"ZH", "EN"}
 
 
 class TTS(nn.Module):
-    """Offline MeloTTS with ONNX BERT and PyTorch acoustics by default."""
+    """Offline MeloTTS using native PyTorch models for the full pipeline."""
 
     def __init__(
         self,
@@ -25,8 +25,6 @@ class TTS(nn.Module):
         device="auto",
         config_path=None,
         ckpt_path=None,
-        bert_backend="onnx",
-        onnx_dir=None,
     ):
         super().__init__()
         language = language.upper()
@@ -64,15 +62,15 @@ class TTS(nn.Module):
         self.language_code = language
         self.language = "ZH_MIX_EN" if language == "ZH" else "EN"
         self.symbol_to_id = {symbol: index for index, symbol in enumerate(hps.symbols)}
-        self.bert_backend = bert_backend.lower()
-        if self.bert_backend == "onnx":
-            from .onnx_api import OnnxBert
+        self.bert_backend = "pytorch"
 
-            self.bert = OnnxBert(language, device=str(self.device), onnx_dir=onnx_dir)
-        elif self.bert_backend == "pytorch":
-            self.bert = None
+    @property
+    def bert_model(self):
+        if self.language_code == "EN":
+            from .text import english_bert as bert_module
         else:
-            raise ValueError("bert_backend must be onnx or pytorch")
+            from .text import multilingual_bert as bert_module
+        return bert_module.model
 
     @staticmethod
     def _concat_audio(segments, sampling_rate, speed):
@@ -109,7 +107,6 @@ class TTS(nn.Module):
                 self.hps,
                 self.device,
                 self.symbol_to_id,
-                bert_feature=self.bert.feature if self.bert is not None else None,
             )
             with torch.inference_mode():
                 phones = phones.to(self.device).unsqueeze(0)

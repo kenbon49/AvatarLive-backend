@@ -1,9 +1,3 @@
 #!/bin/bash
 
-echo "entrypoint.sh"
-whoami
-which python
-source /opt/conda/etc/profile.d/conda.sh
-conda activate musev
-which python
-python app.py
+exec python3 -m accelerated.server --host 0.0.0.0 --port 8083

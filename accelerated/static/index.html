@@ -39,7 +39,7 @@
     <h2>流式数字人控制台</h2>
     <p>上传一段音频，服务端会逐批返回带时间戳的画面和原始音频。默认使用 Chinese 形象。</p>
     <label for="avatar">数字人形象</label>
-    <select id="avatar"><option value="chinese" selected>Chinese（默认）</option><option value="business_male_1">商务男1</option></select>
+    <select id="avatar"><option value="chinese" selected>Chinese（默认）</option><option value="business_male_1">商务男</option><option value="chen_yu">陈屿</option></select>
     <label for="audio">驱动音频</label>
     <input id="audio" type="file" accept="audio/*">
     <button id="run">开始实时播报</button>
@@ -49,21 +49,81 @@
 </main>
 <script>
 const statusEl=document.querySelector('#status'), run=document.querySelector('#run'), canvas=document.querySelector('#screen'), ctx=canvas.getContext('2d');
-let ws, audioContext, audioBase=0, wallBase=0, playbackStarted=false;
+let ws, audioContext, audioBase=0, wallBase=0, playbackStarted=false, streamActive=false;
+let lastDrawnPts=-Infinity, frameRequest=0, streamEpoch=0, pendingFrameDecodes=0;
+const decodedFrames=new Map();
 const playbackBufferSeconds=1.5;
 const setStatus=(s)=>statusEl.textContent=s;
+
+function clearQueuedFrames(){
+  for(const bitmap of decodedFrames.values()) bitmap.close();
+  decodedFrames.clear();
+  if(frameRequest) cancelAnimationFrame(frameRequest);
+  frameRequest=0;
+}
+
+function resetPlayback(){
+  streamEpoch++;
+  playbackStarted=false;
+  streamActive=false;
+  lastDrawnPts=-Infinity;
+  clearQueuedFrames();
+}
+
+function drawDueFrame(){
+  frameRequest=0;
+  if(!playbackStarted) return;
+  const mediaPts=(performance.now()-wallBase)/1000;
+  let nextPts=null;
+  for(const pts of decodedFrames.keys()){
+    if(pts<=lastDrawnPts){
+      decodedFrames.get(pts).close();
+      decodedFrames.delete(pts);
+    }else if(pts<=mediaPts && (nextPts===null || pts>nextPts)){
+      nextPts=pts;
+    }
+  }
+  if(nextPts!==null){
+    const bitmap=decodedFrames.get(nextPts);
+    for(const [pts, stale] of decodedFrames){
+      if(pts<=nextPts){
+        if(pts!==nextPts) stale.close();
+        decodedFrames.delete(pts);
+      }
+    }
+    if(canvas.width!==bitmap.width){canvas.width=bitmap.width;canvas.height=bitmap.height}
+    ctx.drawImage(bitmap,0,0);
+    bitmap.close();
+    lastDrawnPts=nextPts;
+  }
+  // Render against one shared media clock. If decoding or the tab stalls, the
+  // newest due frame wins; replaying a backlog is what makes an idle loop jerk.
+  if(streamActive || decodedFrames.size) frameRequest=requestAnimationFrame(drawDueFrame);
+}
+
+function queueVideoFrame(pts, payload, epoch){
+  // Keep decoder work bounded too: old JPEGs cannot improve a live playback.
+  if(pendingFrameDecodes>=2) return;
+  pendingFrameDecodes++;
+  createImageBitmap(new Blob([payload],{type:'image/jpeg'})).then(bitmap=>{
+    if(epoch!==streamEpoch || pts<=lastDrawnPts){bitmap.close();return}
+    const replaced=decodedFrames.get(pts); if(replaced) replaced.close();
+    decodedFrames.set(pts,bitmap);
+    if(!frameRequest) frameRequest=requestAnimationFrame(drawDueFrame);
+  }).catch(error=>console.warn('JPEG frame decode failed',error)).finally(()=>pendingFrameDecodes--);
+}
 
 function connect(){
   const scheme=location.protocol==='https:'?'wss':'ws';
   ws=new WebSocket(`${scheme}://${location.host}/v1/stream`); ws.binaryType='arraybuffer';
   ws.onopen=()=>setStatus('已连接；等待服务就绪…');
-  ws.onclose=()=>{setStatus('连接已关闭，2 秒后重连…'); setTimeout(connect,2000)};
+  ws.onclose=()=>{resetPlayback();setStatus('连接已关闭，2 秒后重连…'); setTimeout(connect,2000)};
   ws.onmessage=async(event)=>{
     if(typeof event.data==='string'){
       const msg=JSON.parse(event.data); setStatus(`${msg.type}${msg.message?'：'+msg.message:''}`);
       if(msg.type==='ready') run.disabled=false;
-      if(msg.type==='stream_start'){ playbackStarted=false; }
-      if(msg.type==='stream_end'){ run.disabled=false; setStatus(`播报完成，共 ${msg.packets} 个媒体包`); }
+      if(msg.type==='stream_start'){ resetPlayback(); streamActive=true; }
+      if(msg.type==='stream_end'){ streamActive=false; run.disabled=false; setStatus(`播报完成，共 ${msg.packets} 个媒体包`); }
       return;
     }
     const view=new DataView(event.data); if(view.byteLength<24) return;
@@ -80,11 +140,7 @@ function connect(){
       const samples=new Int16Array(payload), buffer=audioContext.createBuffer(1,samples.length,16000), channel=buffer.getChannelData(0);
       for(let i=0;i<samples.length;i++) channel[i]=samples[i]/32768;
       const source=audioContext.createBufferSource(); source.buffer=buffer; source.connect(audioContext.destination); source.start(Math.max(audioContext.currentTime,audioBase+pts));
-    } else if(type===1){
-      const bitmap=await createImageBitmap(new Blob([payload],{type:'image/jpeg'}));
-      const delay=Math.max(0,wallBase+pts*1000-performance.now());
-      setTimeout(()=>{ if(canvas.width!==bitmap.width){canvas.width=bitmap.width;canvas.height=bitmap.height} ctx.drawImage(bitmap,0,0);bitmap.close(); },delay);
-    }
+    } else if(type===1){ queueVideoFrame(pts,payload,streamEpoch); }
   };
 }
 

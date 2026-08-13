@@ -60,4 +60,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD curl -f http://localhost:8083/health || exit 1
 
 # 启动服务
-CMD ["python3", "server.py"]
+CMD ["python3", "-m", "accelerated.server", "--host", "0.0.0.0", "--port", "8083"]

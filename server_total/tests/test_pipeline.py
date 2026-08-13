@@ -98,14 +98,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         profile_ids = [item["id"] for item in response["avatars"]]
         self.assertEqual(
             profile_ids,
-            [
-                "chinese",
-                "business_male_1",
-                "casual_male",
-                "middle_aged_male",
-                "casual_conversation",
-                "casual_female",
-            ],
+            ["chinese", "business_male_1", "chen_yu"],
         )
         self.assertEqual(response["avatars"], AVATAR_CATALOG)
         for profile_id in profile_ids:
@@ -114,14 +107,27 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValidationError):
             AskRequest(type="ask", question="介绍能力", profile="unknown")
 
-    async def test_rejects_non_onnx_musetalk_backend(self):
-        upstream = FakeUpstream(['{"type":"ready","fps":25,"backend":"torch"}'])
+    async def test_rejects_non_torch_musetalk_backend(self):
+        upstream = FakeUpstream(['{"type":"ready","fps":25,"backend":"onnx"}'])
         with patch("server_total.app.websockets.connect", return_value=upstream):
-            with self.assertRaisesRegex(RuntimeError, "expected onnx, got torch"):
+            with self.assertRaisesRegex(RuntimeError, "expected torch, got onnx"):
                 await _render_units(
                     FakeFrontend(),
                     AskRequest(type="ask", question="backend check"),
                     "request-backend",
+                    asyncio.Queue(),
+                )
+
+    async def test_rejects_non_float32_musetalk_inference(self):
+        upstream = FakeUpstream(
+            ['{"type":"ready","fps":25,"backend":"torch","inference_dtype":"float16"}']
+        )
+        with patch("server_total.app.websockets.connect", return_value=upstream):
+            with self.assertRaisesRegex(RuntimeError, "expected float32, got float16"):
+                await _render_units(
+                    FakeFrontend(),
+                    AskRequest(type="ask", question="dtype check"),
+                    "request-dtype",
                     asyncio.Queue(),
                 )
 
@@ -134,12 +140,12 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(duration, 0.125)
         self.assertEqual(http.request[1]["sample_rate"], 16000)
         self.assertEqual(http.request[1]["text"], "简短回答")
-        self.assertEqual(http.request[1]["bert_backend"], "onnx")
+        self.assertEqual(http.request[1]["bert_backend"], "pytorch")
 
     async def test_pipeline_streams_each_text_unit_through_tts_and_musetalk(self):
         upstream = FakeUpstream(
             [
-                '{"type":"ready","fps":25,"backend":"onnx"}',
+                '{"type":"ready","fps":25,"backend":"torch","inference_dtype":"float32"}',
                 '{"type":"started","profile":"business_male_1"}',
                 '{"type":"queued","profile":"business_male_1"}',
                 '{"type":"stream_start"}',
@@ -195,7 +201,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(next_message["segment_seq"], text_unit["seq"])
         self.assertEqual(len(frontend.binary_messages), 2)
         ready = next(item for item in frontend.json_messages if item["type"] == "musetalk_ready")
-        self.assertEqual(ready["backend"], "onnx")
+        self.assertEqual(ready["backend"], "torch")
+        self.assertEqual(ready["inference_dtype"], "float32")
         first = PACKET_HEADER.unpack_from(frontend.binary_messages[0])
         second = PACKET_HEADER.unpack_from(frontend.binary_messages[1])
         self.assertEqual((first[4], first[6]), (0, 0))
@@ -211,7 +218,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
     async def test_pipeline_does_not_deadlock_when_musetalk_fails(self):
         upstream = FakeUpstream(
             [
-                '{"type":"ready","fps":25,"backend":"onnx"}',
+                '{"type":"ready","fps":25,"backend":"torch","inference_dtype":"float32"}',
                 '{"type":"started","profile":"chinese"}',
                 '{"type":"queued","profile":"chinese"}',
                 '{"type":"error","message":"render failed"}',

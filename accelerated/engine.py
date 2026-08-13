@@ -19,7 +19,6 @@ from pathlib import Path
 import tempfile
 import threading
 import time
-from types import SimpleNamespace
 from typing import Any, Iterable, Sequence
 
 import cv2
@@ -51,41 +50,11 @@ class PreparedFrame:
     blend_mask: NDArray[np.uint8]
 
 
-def build_cache_key(manifest_path: str | Path, model_root: str | Path) -> str:
-    """Build a cheap cache key from all source assets and model metadata."""
-
-    manifest = Path(manifest_path).expanduser().resolve(strict=True)
-    root = Path(model_root).expanduser().resolve(strict=True)
-    digest = hashlib.sha256()
-    digest.update(b"synlive-musetalk-v15-cache-v3\0")
-    digest.update(manifest.read_bytes())
-    parsed = json.loads(manifest.read_text(encoding="utf-8"))
-    for entry in parsed.get("actions", {}).values():
-        if not isinstance(entry, dict) or not isinstance(entry.get("file"), str):
-            continue
-        asset = (manifest.parent / entry["file"]).resolve(strict=True)
-        stat = asset.stat()
-        digest.update(str(asset).encode("utf-8"))
-        digest.update(f"{stat.st_size}:{stat.st_mtime_ns}".encode("ascii"))
-    for relative in (
-        "models/musetalkV15/unet.pth",
-        "models/musetalkV15/musetalk.json",
-        "models/sd-vae/diffusion_pytorch_model.bin",
-        "models/whisper/pytorch_model.bin",
-        "models/face-parse-bisent/79999_iter.pth",
-        "models/face-parse-bisent/resnet18-5c106cde.pth",
-    ):
-        path = root / relative
-        stat = path.stat()
-        digest.update(relative.encode("ascii"))
-        digest.update(f"{stat.st_size}:{stat.st_mtime_ns}".encode("ascii"))
-    return digest.hexdigest()
-
-
 class MuseTalkEngine:
     """Load MuseTalk 1.5 and render mouth-only RGB frames."""
 
     model_version = "1.5"
+    inference_dtype = "float32"
 
     def __init__(
         self,
@@ -101,8 +70,6 @@ class MuseTalkEngine:
         audio_padding_left: int = 2,
         audio_padding_right: int = 2,
         device: str = "cuda:0",
-        backend: str = "onnx",
-        onnx_dir: str | Path | None = None,
     ) -> None:
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
@@ -112,9 +79,6 @@ class MuseTalkEngine:
             raise ValueError(f"unsupported parsing mode: {parsing_mode}")
         if not 0.0 <= upper_boundary_ratio <= 1.0:
             raise ValueError("upper_boundary_ratio must be between 0 and 1")
-        if backend not in {"torch", "onnx"}:
-            raise ValueError(f"unsupported inference backend: {backend}")
-
         self.root = Path(model_root).expanduser().resolve(strict=True)
         self.cache_path = Path(cache_path).expanduser().resolve()
         self.batch_size = int(batch_size)
@@ -130,8 +94,7 @@ class MuseTalkEngine:
         self.audio_padding_left = int(audio_padding_left)
         self.audio_padding_right = int(audio_padding_right)
         self.device_name = device
-        self.backend = backend
-        self.onnx_dir = Path(onnx_dir or Path(model_root) / "models/onnx").resolve()
+        self.backend = "torch"
         self._prepared: dict[FrameKey, PreparedFrame] = {}
         self._lock = threading.RLock()
         self._load_models()
@@ -155,65 +118,42 @@ class MuseTalkEngine:
         # Fixed 256x256 batches are faster and avoid multi-second first-shape
         # autotune stalls on RTX 3090 with the current CUDA/PyTorch stack.
         torch.backends.cudnn.benchmark = False
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        torch.set_float32_matmul_precision("highest")
         vae_dir = self.root / "models/sd-vae"
         whisper_dir = self.root / "models/whisper"
         log.info("loading MuseTalk 1.5 %s backend from %s", self.backend, self.root)
         self.vae = VAE(model_path=str(vae_dir))
         self.pe = PositionalEncoding(d_model=384)
-        self.vae.vae = self.vae.vae.to(device=self.device, dtype=torch.float16).eval()
+        self.weight_dtype = torch.float32
+        self.vae.vae = self.vae.vae.to(
+            device=self.device, dtype=self.weight_dtype
+        ).eval()
         self.vae.vae.requires_grad_(False)
-        self.pe = self.pe.to(device=self.device, dtype=torch.float16).eval()
-        self.weight_dtype = torch.float16
+        self.pe = self.pe.to(device=self.device, dtype=self.weight_dtype).eval()
         self.timesteps = torch.tensor([0], device=self.device)
         self.audio_processor = AudioProcessor(feature_extractor_path=str(whisper_dir))
 
-        if self.backend == "onnx":
-            from musetalk.onnx_inference import (
-                OnnxUNet,
-                OnnxVAEDecoder,
-                OnnxWhisperEncoder,
-            )
+        from transformers import WhisperModel
 
-            unet = OnnxUNet(self.onnx_dir / "musetalk_unet.onnx", self.device)
-            self.unet = SimpleNamespace(model=unet)
-            self.decoder = OnnxVAEDecoder(
-                self.onnx_dir / "musetalk_vae_decoder.onnx", self.device
-            )
-            for name, exported_batch in (
-                ("UNet", unet.batch_size),
-                ("VAE Decoder", self.decoder.batch_size),
-            ):
-                if isinstance(exported_batch, int) and exported_batch != self.batch_size:
-                    raise MuseTalkSetupError(
-                        f"ONNX {name} was exported for batch {exported_batch}, but the "
-                        f"service uses batch {self.batch_size}; re-export or change "
-                        "--batch-size"
-                    )
-            self.whisper = SimpleNamespace(
-                encoder=OnnxWhisperEncoder(
-                    self.onnx_dir / "musetalk_whisper_encoder.onnx", self.device
-                )
-            )
-        else:
-            from transformers import WhisperModel
-
-            unet_config = self._require_file("models/musetalkV15/musetalk.json")
-            unet_weights = self._require_file("models/musetalkV15/unet.pth")
-            self.unet = UNet(
-                unet_config=str(unet_config),
-                model_path=str(unet_weights),
-                device=self.device,
-            )
-            self.unet.model = self.unet.model.to(
-                device=self.device, dtype=self.weight_dtype
-            ).eval()
-            self.unet.model.requires_grad_(False)
-            self.decoder = self.vae
-            self.whisper = WhisperModel.from_pretrained(str(whisper_dir))
-            self.whisper = self.whisper.to(
-                device=self.device, dtype=self.weight_dtype
-            ).eval()
-            self.whisper.requires_grad_(False)
+        unet_config = self._require_file("models/musetalkV15/musetalk.json")
+        unet_weights = self._require_file("models/musetalkV15/unet.pth")
+        self.unet = UNet(
+            unet_config=str(unet_config),
+            model_path=str(unet_weights),
+            device=self.device,
+        )
+        self.unet.model = self.unet.model.to(
+            device=self.device, dtype=self.weight_dtype
+        ).eval()
+        self.unet.model.requires_grad_(False)
+        self.decoder = self.vae
+        self.whisper = WhisperModel.from_pretrained(str(whisper_dir))
+        self.whisper = self.whisper.to(
+            device=self.device, dtype=self.weight_dtype
+        ).eval()
+        self.whisper.requires_grad_(False)
         log.info("MuseTalk 1.5 %s model load complete", self.backend)
 
     def _load_face_parser(self):
@@ -387,7 +327,9 @@ class MuseTalkEngine:
                     crop = bgr[y1:y2, x1:x2]
                     crop = cv2.resize(crop, (256, 256), interpolation=cv2.INTER_LANCZOS4)
                     latent = self.vae.get_latents_for_unet(crop)
-                    latent = latent.detach().to(device="cpu", dtype=self.torch.float16)[0]
+                    latent = latent.detach().to(
+                        device="cpu", dtype=self.weight_dtype
+                    )[0]
                     raw_mask, crop_box = get_image_prepare_material(
                         bgr,
                         box,
@@ -431,9 +373,10 @@ class MuseTalkEngine:
 
     def _cache_metadata(self, cache_key: str, count: int, shape: Sequence[int]) -> dict[str, Any]:
         return {
-            "format": 2,
+            "format": 3,
             "cache_key": cache_key,
             "model_version": self.model_version,
+            "inference_dtype": self.inference_dtype,
             "count": count,
             "shape": list(shape),
             "extra_margin": self.extra_margin,
@@ -466,7 +409,7 @@ class MuseTalkEngine:
                 actions = cache["actions"].tolist()
                 indices = cache["indices"].astype(np.int64, copy=False).tolist()
                 boxes = cache["boxes"].astype(np.int32, copy=False)
-                latents = cache["latents"].astype(np.float16, copy=False)
+                latents = cache["latents"].astype(np.float32, copy=False)
                 masks = cache["masks"].astype(np.uint8, copy=False)
                 if not (
                     len(actions)
@@ -519,7 +462,7 @@ class MuseTalkEngine:
         actions = np.asarray([item.action for item in prepared])
         indices = np.asarray([item.frame_index for item in prepared], dtype=np.int32)
         boxes = np.asarray([item.face_box for item in prepared], dtype=np.int32)
-        latents = np.stack([item.latent.numpy() for item in prepared]).astype(np.float16)
+        latents = np.stack([item.latent.numpy() for item in prepared]).astype(np.float32)
         masks = np.stack([item.blend_mask for item in prepared]).astype(np.uint8)
         temporary = cache_path.with_name(cache_path.name + ".tmp")
         with temporary.open("wb") as handle:

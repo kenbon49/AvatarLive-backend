@@ -6,7 +6,7 @@
 LiteLLM token 流
   -> answer 正文增量
   -> 逐标点 text_unit
-  -> 每个单元调用 ONNX BERT + PyTorch MeloTTS
+  -> 每个单元调用 PyTorch BERT + PyTorch MeloTTS
   -> 每个 PCM 单元独立提交 MuseTalk
   -> 连续时间轴的 PCM/JPEG 媒体包
 ```
@@ -26,21 +26,11 @@ docker compose -f docker-compose.dev.yml up --build
 - `melotts_dev`：MeloTTS2 常驻语音合成，内部端口 `8084`。
 - `server_total_dev`：流式编排 API，宿主机端口 `8080`。
 
-`server_total` 向 MeloTTS2 请求时固定声明 `bert_backend=onnx`。因此默认语音链路使用
-ONNX Runtime BERT GPU 推理，BERT CUDA 特征随后直接交给 PyTorch MeloTTS 声学模型。
-
-MuseTalk 流式服务同样默认使用 ONNX Runtime CUDA：Whisper Encoder、MuseTalk UNet
-和 VAE Decoder 均加载 `models/onnx/` 下的转换产物，固定使用已经验证的 batch 1。
-`server_total` 会校验 MuseTalk WebSocket 握手中的 `backend=onnx`，避免误连到 PyTorch
-后端。首次启动前先在宿主机导出模型：
-
-```powershell
-python scripts/export_musetalk_onnx.py --models all --batch-size 1
-docker compose -f docker-compose.dev.yml up --build
-```
-
-根目录 `requirements.txt` 安装 `onnx` 和 `onnxruntime-gpu`；轻量的
-`server_total` 网关不加载模型，所以它自己的 requirements 不重复安装 GPU runtime。
+`server_total` 向 MeloTTS2 请求时固定声明 `bert_backend=pytorch`，MeloTTS BERT 与声学模型
+均直接加载本地 PyTorch 权重。MuseTalk 流式服务也只使用 PyTorch：Whisper Encoder、UNet
+和 VAE 直接加载仓库中的 `.pth`/`.bin` 等原生权重。聚合服务会校验 MuseTalk WebSocket
+握手中的 `backend=torch`，防止连接到其他推理后端。运行服务不需要模型导出步骤，也不
+安装 ONNX Runtime。
 
 ```text
 GET  http://localhost:8080/health
@@ -48,14 +38,11 @@ GET  http://localhost:8080/v1/avatars
 WS   ws://localhost:8080/v1/conversation
 ```
 
-`GET /v1/avatars` 返回六个已在 MuseTalk 启动阶段完成预处理的公共形象：
+`GET /v1/avatars` 返回三个已在 MuseTalk 启动阶段完成预处理的公共形象：
 
-- `chinese`（默认）：`data/public/chinese.mp4`
-- `business_male_1`：`data/public/商务男1.mp4`
-- `casual_male`：`data/public/休闲风.mp4`
-- `middle_aged_male`：`data/public/中年.mp4`
-- `casual_conversation`：`data/public/休闲交流.mp4`
-- `casual_female`：`data/public/休闲2.mp4`
+- `chinese`（默认）：`data/public/chinese2.mp4`
+- `business_male_1`：`data/public/商务男确定.mp4`
+- `chen_yu`：`data/public/陈屿.mp4`
 
 ## 请求协议
 

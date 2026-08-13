@@ -23,8 +23,8 @@ python -m pip install -r requirements.txt
 
 所有权重均从当前目录读取，推理过程不会联网下载模型。
 
-Docker 服务默认使用 `cuda:0`。默认推理链为 ONNX Runtime BERT + PyTorch MeloTTS
-声学模型。应用启动阶段会用 `MELOTTS_WARMUP_TEXT` 执行一次合成，将
+Docker 服务默认使用 `cuda:0`。BERT 与 MeloTTS 声学模型均直接使用 PyTorch 推理。
+应用启动阶段会用 `MELOTTS_WARMUP_TEXT` 执行一次合成，将
 `MELOTTS_DEFAULT_LANGUAGE` 对应的两个模型加载到显卡；
 如果 CUDA 不可用，启动会直接失败，不会静默回退到 CPU。`/health` 中的
 `gpu_ready`、`model_devices` 和 `bert_devices` 可用于确认权重驻留位置。
@@ -67,67 +67,14 @@ audio = model.tts_to_file(
 ```
 
 `tts_to_file` 同时返回 `float32` NumPy 音频数组；将输出路径设为 `None` 时只返回数组，不写文件。
-`TTS` 默认使用 `bert_backend="onnx"`；仅在需要回退验证时显式传入
-`bert_backend="pytorch"`。声学模型始终使用 PyTorch。
-
-## ONNX 导出与推理
-
-一次性导出中英文 BERT 和 MeloTTS 声学模型：
-
-```powershell
-python export_onnx.py --device cpu
-```
-
-默认输出到 `onnx_models/`：
-
-```text
-onnx_models/
-  bert/
-    english_bert.onnx
-    multilingual_bert.onnx
-  EN/
-    encoder_duration.onnx
-    flow.onnx
-    generator.onnx
-  ZH/
-    encoder_duration.onnx
-    flow.onnx
-    generator.onnx
-  manifest.json
-```
-
-也可以只导出指定语言或指定模型类型：
-
-```powershell
-python export_onnx.py --languages ZH --skip-acoustic
-python export_onnx.py --languages EN --skip-bert
-```
-
-ONNX Runtime 命令行推理：
-
-```powershell
-python infer_onnx.py --language ZH --text "你好，This is MeloTTS." --output output_zh_onnx.wav --device cuda
-python infer_onnx.py --language EN --speaker EN-US --text "Hello from ONNX." --output output_en_onnx.wav --device cuda
-```
-
-Python 调用：
-
-```python
-from melo import OnnxTTS
-
-model = OnnxTTS("ZH", device="cuda:0", seed=1234)
-speaker_id = model.hps.data.spk2id.ZH
-audio = model.tts_to_file("你好，欢迎使用 ONNX。", speaker_id, "output.wav")
-```
-
-声学模型按 `encoder_duration -> 动态对齐/采样 -> flow -> generator` 分图。CUDA 推理默认启用 ONNX Runtime I/O Binding，BERT 输出、动态对齐以及三个声学子图之间通过 CUDA Tensor 直接传递，仅最终音频复制回 CPU。CUDA Provider 使用 ONNX Runtime 1.17.1 支持的默认计算流配置，避免因不兼容的 Provider option 触发 Session 重建。随机时长噪声作为显式输入，因此指定相同 `seed` 可以复现 ONNX 输出。文本归一化、G2P、tokenizer 和 WAV 写入仍在 CPU/Python 中，动态帧数分配需要读取一个 GPU 标量。ONNX 推理强制使用 `CUDAExecutionProvider` 并关闭执行回退，没有 GPU Provider 时直接报错；仅在显式传入 `device="cpu"` 时才使用 CPU。导出后应使用固定文本对比 PyTorch 与 ONNX 的发音、时长和音质。
+服务没有推理后端开关，也不需要导出模型；`TTS` 始终加载本地 PyTorch 权重。
 
 ## 推理流程
 
 1. `split_utils.py` 按中英文标点切分长文本。
 2. `text/` 完成数字与标点归一化、中文拼音/英文音素转换、声调和语言 ID 编码。
-3. ONNX Runtime 在 GPU 上执行 `multilingual` 或 `english_bert`，并通过 I/O Binding 生成 CUDA 特征。
-4. PyTorch `SynthesizerTrn.infer` 直接接收 CUDA BERT 特征，预测时长、隐变量和对齐并输出波形。
+3. PyTorch 在 GPU 上执行 `multilingual` 或 `english_bert`，生成 BERT 特征。
+4. PyTorch `SynthesizerTrn.infer` 接收 CUDA BERT 特征，预测时长、隐变量和对齐并输出波形。
 5. 多句音频之间插入 50 ms 静音，最终写为 WAV。
 
 ## 目录边界

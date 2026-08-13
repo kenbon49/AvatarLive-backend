@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /app/requirements.txt
-# Keep PyTorch, ONNX Runtime, CUDA, and cuDNN on one tested compatibility stack.
+# Keep PyTorch, CUDA, and cuDNN on one tested compatibility stack.
 RUN python -m pip install --no-cache-dir --upgrade pip \
     && python -m pip install --no-cache-dir -r /app/requirements.txt
 

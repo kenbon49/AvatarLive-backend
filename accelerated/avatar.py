@@ -82,15 +82,13 @@ class AvatarLoader:
         cache_dir: str | Path,
         *,
         target_fps: float = 25.0,
-        max_height: int = 720,
         bbox_shift: int = 5,
         detection_stride: int = 5,
     ) -> None:
-        if target_fps <= 0 or max_height <= 0 or detection_stride <= 0:
-            raise ValueError("fps, max_height, and detection_stride must be positive")
+        if target_fps <= 0 or detection_stride <= 0:
+            raise ValueError("fps and detection_stride must be positive")
         self.cache_dir = Path(cache_dir).expanduser().resolve()
         self.target_fps = float(target_fps)
-        self.max_height = int(max_height)
         self.bbox_shift = int(bbox_shift)
         self.detection_stride = int(detection_stride)
 
@@ -103,7 +101,7 @@ class AvatarLoader:
             "size": stat.st_size,
             "mtime_ns": stat.st_mtime_ns,
             "target_fps": self.target_fps,
-            "max_height": self.max_height,
+            "preserve_source_resolution": True,
             "bbox_shift": self.bbox_shift,
             "detection_stride": self.detection_stride,
             "clip_start_seconds": spec.clip_start_seconds,
@@ -133,14 +131,7 @@ class AvatarLoader:
                     continue
                 if timestamp + 1e-8 < next_time:
                     continue
-                height, width = bgr.shape[:2]
-                if height > self.max_height:
-                    scale = self.max_height / height
-                    bgr = cv2.resize(
-                        bgr,
-                        (max(2, round(width * scale)), self.max_height),
-                        interpolation=cv2.INTER_AREA,
-                    )
+                # Match standalone MuseTalk: keep the decoded source resolution.
                 frames.append(np.ascontiguousarray(bgr[:, :, ::-1]))
                 next_time += 1.0 / self.target_fps
         finally:
@@ -176,7 +167,7 @@ class AvatarLoader:
         with tempfile.TemporaryDirectory(prefix="musetalk-avatar-") as directory:
             paths: list[str] = []
             for position, index in enumerate(indices):
-                path = Path(directory) / f"{position:06d}.jpg"
+                path = Path(directory) / f"{position:06d}.png"
                 if not cv2.imwrite(str(path), frames[index][:, :, ::-1]):
                     raise AvatarPreparationError(f"failed to write temporary frame {path}")
                 paths.append(str(path))

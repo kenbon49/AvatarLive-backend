@@ -74,6 +74,28 @@ class StreamingTests(unittest.TestCase):
         self.assertEqual(len(engine.feature_inputs), 1)
         self.assertFalse(np.any(engine.feature_inputs[0]))
 
+    def test_renderer_does_not_carry_position_between_requests(self):
+        profile = make_profile()
+        engine = FakeEngine()
+        renderer = StreamingRenderer(engine, fps=25)
+        pcm = np.zeros(2 * 640, dtype="<i2").tobytes()
+
+        first = list(renderer.render(pcm, profile))
+        second = list(renderer.render(pcm, profile))
+
+        self.assertEqual(first[0].frames[0, 0, 0, 0], 0)
+        self.assertEqual(second[0].frames[0, 0, 0, 0], 0)
+
+    def test_renderer_uses_the_session_position_requested_by_the_server(self):
+        profile = make_profile()
+        engine = FakeEngine()
+        renderer = StreamingRenderer(engine, fps=25)
+        pcm = np.zeros(2 * 640, dtype="<i2").tobytes()
+
+        batches = list(renderer.render(pcm, profile, start_position=2))
+
+        self.assertEqual(batches[0].frames[0, 0, 0, 0], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

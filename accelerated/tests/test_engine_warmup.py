@@ -13,10 +13,10 @@ class EngineWarmUpTests(unittest.TestCase):
     def test_warm_up_exercises_whisper_before_rendering(self):
         engine = object.__new__(MuseTalkEngine)
         engine.batch_size = 1
-        engine.weight_dtype = "float16"
+        engine.weight_dtype = "float32"
         fixed_prompts = object()
         engine.torch = SimpleNamespace(zeros=Mock(return_value=fixed_prompts))
-        whisper_prompts = np.zeros((25, 50, 384), dtype=np.float16)
+        whisper_prompts = np.zeros((25, 50, 384), dtype=np.float32)
         engine.extract_audio_features = Mock(return_value=whisper_prompts)
         engine.render_batch = Mock()
 

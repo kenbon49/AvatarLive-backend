@@ -18,6 +18,8 @@ exp_out
 .gradio
 .env
 **/.env
+.claude/
+.tmp-*/
 
 core_data/*
 doc/*
@@ -26,6 +28,7 @@ data/*
 !data/public/
 data/public/*
 !data/public/*.mp4
+data/public/*.exe
 cache/
 MeloTTS2/bert_model/
 MeloTTS2/pretrained_model/

@@ -363,9 +363,9 @@ if __name__ == "__main__":
     )
     timesteps = torch.tensor([0], device=device)
 
-    pe = pe.half().to(device)
-    vae.vae = vae.vae.half().to(device)
-    unet.model = unet.model.half().to(device)
+    pe = pe.to(device=device, dtype=torch.float32)
+    vae.vae = vae.vae.to(device=device, dtype=torch.float32)
+    unet.model = unet.model.to(device=device, dtype=torch.float32)
 
     # Initialize audio processor and Whisper model
     audio_processor = AudioProcessor(feature_extractor_path=args.whisper_dir)

@@ -1,3 +1,7 @@
+# AvatarLive-backend
+
+AvatarLive 的数字人后端，基于 MuseTalk，并集成实时推理、MeloTTS、LLM 编排及 Gradio 展示界面。
+
 # MuseTalk
 
 <strong>MuseTalk: Real-Time High-Fidelity Video Dubbing via Spatio-Temporal Sampling</strong>
@@ -202,6 +206,22 @@ Add the `ffmpeg-xxx\bin` directory to your system's PATH environment variable. V
 ### Download weights
 You can download weights in two ways:
 
+> 模型权重不提交到 Git。请在仓库根目录运行下载脚本，或按下表手动下载并放到对应位置。
+
+| 模型 | 下载链接 | 存放位置（相对仓库根目录） |
+| --- | --- | --- |
+| MuseTalk 1.5 | [TMElyralab/MuseTalk](https://huggingface.co/TMElyralab/MuseTalk/tree/main/musetalkV15) | `models/musetalkV15/musetalk.json`、`models/musetalkV15/unet.pth` |
+| MuseTalk 1.0 | [TMElyralab/MuseTalk](https://huggingface.co/TMElyralab/MuseTalk/tree/main/musetalk) | `models/musetalk/musetalk.json`、`models/musetalk/pytorch_model.bin` |
+| SD VAE | [stabilityai/sd-vae-ft-mse](https://huggingface.co/stabilityai/sd-vae-ft-mse/tree/main) | `models/sd-vae/` |
+| Whisper Tiny | [openai/whisper-tiny](https://huggingface.co/openai/whisper-tiny/tree/main) | `models/whisper/` |
+| DWPose | [yzd-v/DWPose](https://huggingface.co/yzd-v/DWPose/tree/main) | `models/dwpose/dw-ll_ucoco_384.pth` |
+| SyncNet | [ByteDance/LatentSync](https://huggingface.co/ByteDance/LatentSync/tree/main) | `models/syncnet/latentsync_syncnet.pt` |
+| Face Parse BiSeNet | [79999_iter.pth](https://drive.google.com/file/d/154JgKpzCPW82qINcVieuPH3fZ2e0P812/view) | `models/face-parse-bisent/79999_iter.pth` |
+| ResNet-18 | [resnet18-5c106cde.pth](https://download.pytorch.org/models/resnet18-5c106cde.pth) | `models/face-parse-bisent/resnet18-5c106cde.pth` |
+| Robust Video Matting (可选抠图) | [PeterL1n/RobustVideoMatting](https://github.com/PeterL1n/RobustVideoMatting#download) | `models/rmbg_weight/rvm_resnet50.pth` |
+
+MeloTTS 服务还需要中英文声学模型与 BERT 权重，分别放在 `MeloTTS2/pretrained_model/EN/`、`MeloTTS2/pretrained_model/ZH/`、`MeloTTS2/bert_model/english_bert/` 和 `MeloTTS2/bert_model/multilingual/`。具体文件结构与语言映射见 [`MeloTTS2/README.md`](MeloTTS2/README.md)。
+
 #### Option 1: Using Download Scripts
 We provide two scripts for automatic downloading:
 
@@ -328,18 +348,6 @@ Important notes for real-time inference:
 For faster generation without saving images, you can use:
 ```bash
 python -m scripts.realtime_inference --inference_config configs/inference/realtime.yaml --skip_save_images
-```
-
-## Gradio Demo
-We provide an intuitive web interface through Gradio for users to easily adjust input parameters. To optimize inference time, users can generate only the **first frame** to fine-tune the best lip-sync parameters, which helps reduce facial artifacts in the final output.
-![para](assets/figs/gradio_2.png)
-For minimum hardware requirements, we tested the system on a Windows environment using an NVIDIA GeForce RTX 3050 Ti Laptop GPU with 4GB VRAM. In fp16 mode, generating an 8-second video takes approximately 5 minutes. ![speed](assets/figs/gradio.png)
-
-Both Linux and Windows users can launch the demo using the following command. Please ensure that the `ffmpeg_path` parameter matches your actual FFmpeg installation path:
-
-```bash
-# You can remove --use_float16 for better quality, but it will increase VRAM usage and inference time
-python app.py --use_float16 --ffmpeg_path ffmpeg-master-latest-win64-gpl-shared\bin
 ```
 
 ## Training
