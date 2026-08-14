@@ -1,0 +1,94 @@
+name: avatarlive-backend
+
+services:
+  musetalk:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    image: avatarlive-backend-musetalk:local
+    ports:
+      - "8083:8083"
+    volumes:
+      - /data/MuseTalk/models:/app/models:ro
+      - ./cache:/app/cache
+    environment:
+      PYTHONUNBUFFERED: "1"
+      CUDA_VISIBLE_DEVICES: "0"
+      MUSETALK_DEVICE: cuda:0
+      # Float32 inference on this RTX 3090 sustains about 15 fps.
+      MUSETALK_FPS: "${SERVER_TOTAL_MUSETALK_FPS:-15}"
+      MUSETALK_BATCH_SIZE: "${SERVER_TOTAL_MUSETALK_BATCH_SIZE:-4}"
+      MUSETALK_MAX_FRAME_HEIGHT: "${SERVER_TOTAL_MUSETALK_MAX_FRAME_HEIGHT:-720}"
+    command: python3 -u -m accelerated.server --host 0.0.0.0 --port 8083
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8083/readiness | grep -q '\"status\":\"ready\"'"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 300s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+
+  melotts:
+    build:
+      context: ./MeloTTS2
+      dockerfile: Dockerfile.local
+    image: avatarlive-backend-melotts:local
+    ports:
+      - "8084:8084"
+    volumes:
+      - ./MeloTTS2/pretrained_model:/app/pretrained_model:ro
+      - ./MeloTTS2/bert_model:/app/bert_model:ro
+    environment:
+      PYTHONUNBUFFERED: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      CUDA_VISIBLE_DEVICES: "0"
+      MELOTTS_DEVICE: cuda:0
+      MELOTTS_DEFAULT_LANGUAGE: ZH
+      MELOTTS_WARMUP_TEXT: 你好。
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8084/health | grep -q '\"gpu_ready\":true'"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+
+  server-total:
+    build:
+      context: .
+      dockerfile: server_total/Dockerfile
+    image: avatarlive-backend-server-total:local
+    ports:
+      - "8085:8080"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      LITELLM_BASE_URL: ${LITELLM_LLM_BASE_URL:?set in AvatarLive .env}
+      LITELLM_API_KEY: ${LITELLM_LLM_API_KEY:?set in AvatarLive .env}
+      # The frontend value is a UI model id; server_total calls LiteLLM directly.
+      LITELLM_MODEL: ${SERVER_TOTAL_LITELLM_MODEL:-azure-gpt-5.4}
+      LITELLM_TEMPERATURE: ${SERVER_TOTAL_LITELLM_TEMPERATURE:-1}
+      MELOTTS_URL: http://melotts:8084
+      MUSETALK_WS_URL: ws://musetalk:8083/v1/stream
+      PIPELINE_REQUEST_TIMEOUT: "300"
+      PIPELINE_FIRST_UNIT_MIN_CHARS: "12"
+      PIPELINE_TARGET_UNIT_CHARS: "20"
+    depends_on:
+      musetalk:
+        condition: service_healthy
+      melotts:
+        condition: service_healthy
+    restart: unless-stopped

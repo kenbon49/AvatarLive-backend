@@ -200,7 +200,14 @@ def text_normalize(text):
     return text
 
 model_id = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "bert_model", "english_bert")
-tokenizer = AutoTokenizer.from_pretrained(model_id)
+tokenizer = None
+
+
+def get_tokenizer():
+    global tokenizer
+    if tokenizer is None:
+        tokenizer = AutoTokenizer.from_pretrained(model_id, local_files_only=True)
+    return tokenizer
 
 
 def distribute_phone(phone_count, token_count):
@@ -210,7 +217,7 @@ def distribute_phone(phone_count, token_count):
     return counts
 def g2p(text, pad_start_end=True, tokenized=None):
     if tokenized is None:
-        tokenized = tokenizer.tokenize(text)
+        tokenized = get_tokenizer().tokenize(text)
     # import pdb; pdb.set_trace()
     ph_groups = []
     for t in tokenized:
@@ -256,4 +263,3 @@ def get_bert_feature(text, word2ph, device=None):
     from . import english_bert
 
     return english_bert.get_bert_feature(text, word2ph, device=device)
-

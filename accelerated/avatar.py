@@ -84,30 +84,43 @@ class AvatarLoader:
         target_fps: float = 25.0,
         bbox_shift: int = 5,
         detection_stride: int = 5,
+        max_frame_height: int = 0,
     ) -> None:
-        if target_fps <= 0 or detection_stride <= 0:
-            raise ValueError("fps and detection_stride must be positive")
+        if target_fps <= 0 or detection_stride <= 0 or max_frame_height < 0:
+            raise ValueError("fps and detection_stride must be positive; max height must not be negative")
         self.cache_dir = Path(cache_dir).expanduser().resolve()
         self.target_fps = float(target_fps)
         self.bbox_shift = int(bbox_shift)
         self.detection_stride = int(detection_stride)
+        self.max_frame_height = int(max_frame_height)
 
     def _signature(self, spec: AvatarSpec) -> str:
         path = spec.video_path.resolve(strict=True)
         stat = path.stat()
         value = {
-            "format": 1,
+            "format": 2,
             "path": str(path),
             "size": stat.st_size,
             "mtime_ns": stat.st_mtime_ns,
             "target_fps": self.target_fps,
-            "preserve_source_resolution": True,
+            "max_frame_height": self.max_frame_height,
             "bbox_shift": self.bbox_shift,
             "detection_stride": self.detection_stride,
             "clip_start_seconds": spec.clip_start_seconds,
             "clip_end_seconds": spec.clip_end_seconds,
         }
         return hashlib.sha256(json.dumps(value, sort_keys=True).encode("utf-8")).hexdigest()
+
+    def _resize_frame(self, frame: NDArray[np.uint8]) -> NDArray[np.uint8]:
+        height, width = frame.shape[:2]
+        if not self.max_frame_height or height <= self.max_frame_height:
+            return frame
+        target_width = max(1, round(width * self.max_frame_height / height))
+        return cv2.resize(
+            frame,
+            (target_width, self.max_frame_height),
+            interpolation=cv2.INTER_AREA,
+        )
 
     def _decode(self, spec: AvatarSpec) -> tuple[list[RGBFrame], float]:
         path = spec.video_path
@@ -131,7 +144,7 @@ class AvatarLoader:
                     continue
                 if timestamp + 1e-8 < next_time:
                     continue
-                # Match standalone MuseTalk: keep the decoded source resolution.
+                bgr = self._resize_frame(bgr)
                 frames.append(np.ascontiguousarray(bgr[:, :, ::-1]))
                 next_time += 1.0 / self.target_fps
         finally:

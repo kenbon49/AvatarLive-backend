@@ -6,10 +6,22 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import numpy as np
+
+from accelerated.avatar import AvatarLoader
 from accelerated.runtime import MuseTalkRuntime, PUBLIC_AVATAR_FILES, RuntimeConfig
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_avatar_loader_limits_large_frames_without_upscaling(self):
+        loader = AvatarLoader("cache", max_frame_height=720)
+
+        large = np.zeros((1280, 720, 3), dtype=np.uint8)
+        small = np.zeros((720, 406, 3), dtype=np.uint8)
+
+        self.assertEqual(loader._resize_frame(large).shape, (720, 405, 3))
+        self.assertIs(loader._resize_frame(small), small)
+
     def test_public_avatar_registry_uses_the_public_directory(self):
         root = Path("project-root").resolve()
         runtime = MuseTalkRuntime(RuntimeConfig.defaults(root))

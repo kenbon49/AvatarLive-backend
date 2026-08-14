@@ -31,6 +31,7 @@ class RuntimeConfig:
     fps: float = 25.0
     bbox_shift: int = 5
     detection_stride: int = 5
+    max_frame_height: int = 0
     batch_size: int = 12
     device: str = "cuda:0"
 
@@ -69,10 +70,11 @@ class MuseTalkRuntime:
             target_fps=config.fps,
             bbox_shift=config.bbox_shift,
             detection_stride=config.detection_stride,
+            max_frame_height=config.max_frame_height,
         )
 
     def _profile_cache_key(self, spec: AvatarSpec) -> str:
-        digest = hashlib.sha256(b"musetalk-v15-stream-profile-v2-float32\0")
+        digest = hashlib.sha256(b"musetalk-v15-stream-profile-v3-float32\0")
         video = spec.video_path.resolve(strict=True)
         stat = video.stat()
         digest.update(f"{video}:{stat.st_size}:{stat.st_mtime_ns}".encode("utf-8"))
@@ -86,8 +88,8 @@ class MuseTalkRuntime:
             model_stat = path.stat()
             digest.update(f"{relative}:{model_stat.st_size}:{model_stat.st_mtime_ns}".encode("utf-8"))
         digest.update(
-            f"{self.config.fps}:preserve_source_resolution:{self.config.bbox_shift}:"
-            f"{self.config.detection_stride}".encode("ascii")
+            f"{self.config.fps}:max_height={self.config.max_frame_height}:"
+            f"{self.config.bbox_shift}:{self.config.detection_stride}".encode("ascii")
         )
         digest.update(
             f":{spec.clip_start_seconds}:{spec.clip_end_seconds}:{spec.ping_pong}".encode("ascii")
@@ -171,6 +173,7 @@ class MuseTalkRuntime:
             "inference_dtype": MuseTalkEngine.inference_dtype,
             "fps": self.config.fps,
             "batch_size": self.config.batch_size,
+            "max_frame_height": self.config.max_frame_height,
             "model_devices": model_devices,
             "model_dtypes": model_dtypes,
             "gpu_ready": gpu_ready,

@@ -213,7 +213,16 @@ def main() -> None:
     parser.add_argument("--host", default=os.getenv("MUSETALK_HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.getenv("MUSETALK_PORT", "8083")))
     parser.add_argument("--fps", type=float, default=float(os.getenv("MUSETALK_FPS", "25")))
-    parser.add_argument("--batch-size", type=int, default=int(os.getenv("MUSETALK_BATCH_SIZE", "12")))
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=int(os.getenv("MUSETALK_BATCH_SIZE", "12")),
+    )
+    parser.add_argument(
+        "--max-frame-height",
+        type=int,
+        default=int(os.getenv("MUSETALK_MAX_FRAME_HEIGHT", "0")),
+    )
     parser.add_argument("--device", default=os.getenv("MUSETALK_DEVICE", "cuda:0"))
     args = parser.parse_args()
 
@@ -225,6 +234,7 @@ def main() -> None:
             **config.__dict__,
             "fps": args.fps,
             "batch_size": args.batch_size,
+            "max_frame_height": args.max_frame_height,
             "device": args.device,
         }
     )
