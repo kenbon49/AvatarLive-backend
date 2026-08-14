@@ -31,7 +31,7 @@ class RuntimeConfig:
     fps: float = 25.0
     bbox_shift: int = 5
     detection_stride: int = 5
-    batch_size: int = 1
+    batch_size: int = 12
     device: str = "cuda:0"
 
     @classmethod

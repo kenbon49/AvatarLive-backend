@@ -61,7 +61,7 @@ class MuseTalkEngine:
         model_root: str | Path,
         *,
         cache_path: str | Path,
-        batch_size: int = 1,
+        batch_size: int = 12,
         extra_margin: int = 10,
         parsing_mode: str = "jaw",
         upper_boundary_ratio: float = 0.55,

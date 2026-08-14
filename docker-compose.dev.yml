@@ -22,8 +22,8 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - CUDA_VISIBLE_DEVICES=0
-      - MUSETALK_FPS=${MUSETALK_FPS:-25}
-      - MUSETALK_BATCH_SIZE=${MUSETALK_BATCH_SIZE:-4}
+      - MUSETALK_FPS=${MUSETALK_FPS:-18}
+      - MUSETALK_BATCH_SIZE=${MUSETALK_BATCH_SIZE:-12}
       - DEBUG=1  # 开发模式标志
 
     # 开发模式使用命令行启动，方便调试

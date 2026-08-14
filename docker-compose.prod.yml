@@ -17,7 +17,7 @@ services:
       PYTHONUNBUFFERED: "1"
       CUDA_VISIBLE_DEVICES: "0"
       MUSETALK_FPS: ${MUSETALK_FPS:-25}
-      MUSETALK_BATCH_SIZE: ${MUSETALK_BATCH_SIZE:-4}
+      MUSETALK_BATCH_SIZE: ${MUSETALK_BATCH_SIZE:-12}
     deploy:
       resources:
         reservations:
