@@ -1,0 +1,31 @@
+FROM chatglm-cuda:latest
+
+WORKDIR /app
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    HF_ENDPOINT=https://hf-mirror.com
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ffmpeg \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.local.txt /app/requirements.local.txt
+RUN python3 -m pip install --no-cache-dir -r /app/requirements.local.txt \
+        -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    && python3 -m pip install --no-cache-dir -U openmim \
+        -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    && mim install "mmcv==2.0.1" \
+    && mim install "mmdet==3.1.0" \
+    && mim install "mmpose==1.1.0"
+
+COPY . /app
+RUN mkdir -p /app/core_data
+
+EXPOSE 8083
+CMD ["python3", "-u", "-m", "accelerated.server", "--host", "0.0.0.0", "--port", "8083"]

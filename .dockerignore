@@ -37,6 +37,8 @@ docs/
 # 数据和模型（这些应该通过卷挂载）
 core_data/
 models/
+MeloTTS2/bert_model/
+MeloTTS2/pretrained_model/
 data/output/
 *.pth
 *.ckpt
