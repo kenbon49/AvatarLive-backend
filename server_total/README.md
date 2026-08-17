@@ -1,4 +1,4 @@
-# LLM + MeloTTS2 + MuseTalk 流式总服务
+# LLM + CosyVoice + MuseTalk 流式总服务
 
 `server_total` 将三个服务组成有背压的端到端流水线：
 
@@ -6,7 +6,7 @@
 LiteLLM token 流
   -> answer 正文增量
   -> 逐标点 text_unit
-  -> 每个单元调用 PyTorch BERT + PyTorch MeloTTS
+  -> 每个单元调用 CosyVoice 预置或克隆音色
   -> 每个 PCM 单元独立提交 MuseTalk
   -> 连续时间轴的 PCM/JPEG 媒体包
 ```
@@ -23,11 +23,11 @@ docker compose -f docker-compose.dev.yml up --build
 三个容器分别为：
 
 - `musetalk_dev`：GPU 数字人流式推理，内部端口 `8083`。
-- `melotts_dev`：MeloTTS2 常驻语音合成，内部端口 `8084`。
+- `cosyvoice_dev`：CosyVoice 常驻语音合成、Whisper 转写和克隆音色，内部端口 `8084`。
 - `server_total_dev`：流式编排 API，宿主机端口 `8080`。
 
-`server_total` 向 MeloTTS2 请求时固定声明 `bert_backend=pytorch`，MeloTTS BERT 与声学模型
-均直接加载本地 PyTorch 权重。MuseTalk 流式服务也只使用 PyTorch：Whisper Encoder、UNet
+`server_total` 按每个请求的 `voice_id` 调用 CosyVoice，并把其原生采样率 PCM 统一转换为
+16 kHz 后继续原有的逐标点流式管线。MuseTalk 流式服务也只使用 PyTorch：Whisper Encoder、UNet
 和 VAE 直接加载仓库中的 `.pth`/`.bin` 等原生权重。聚合服务会校验 MuseTalk WebSocket
 握手中的 `backend=torch`，防止连接到其他推理后端。运行服务不需要模型导出步骤，也不
 安装 ONNX Runtime。
@@ -35,6 +35,8 @@ docker compose -f docker-compose.dev.yml up --build
 ```text
 GET  http://localhost:8080/health
 GET  http://localhost:8080/v1/avatars
+GET  http://localhost:8080/v1/voices
+POST http://localhost:8080/v1/voices/clone
 WS   ws://localhost:8080/v1/conversation
 ```
 
@@ -54,10 +56,21 @@ WS   ws://localhost:8080/v1/conversation
   "request_id": "可选的客户端请求ID",
   "question": "请简单介绍一下北京。",
   "profile": "chinese",
+  "voice_id": "customer_service_female",
   "language": "ZH",
   "speed": 1.0
 }
 ```
+
+`GET /v1/voices` 返回 Fish Audio 预置音色和已经保存的用户克隆音色。上传新的克隆音色：
+
+```bash
+curl -F "name=我的音色" -F "audio=@reference.wav" http://localhost:8080/v1/voices/clone
+```
+
+服务会用本地 Whisper 识别中文，标准化为 16 kHz WAV，并持久化到
+`CosyVoice/voice_library/clones/<voice_id>`。返回的 `voice_id` 可直接用于 WebSocket 的
+`ask`/`speak` 请求；原有的 `speaker` 字段仍作为兼容别名保留。
 
 调用方通过 `profile` 选择本轮推理使用的数字人。省略该字段时使用 `chinese`；例如选择
 商务男形象时传入 `"profile": "business_male_1"`。WebSocket 首次返回的 `ready`

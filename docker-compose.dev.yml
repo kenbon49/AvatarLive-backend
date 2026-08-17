@@ -1,5 +1,54 @@
 # 开发环境配置 - 支持代码热更新
 services:
+  # CosyVoice 提供预置音色、Whisper 转写和零样本音色克隆。
+  cosyvoice-dev:
+    build:
+      context: ./CosyVoice
+      dockerfile: Dockerfile
+
+    container_name: cosyvoice_dev
+    image: cosyvoice:dev
+    # This is a project-local image built from the pre-pulled PyTorch base.
+    pull_policy: build
+
+    ports:
+      - "8084:8084"
+
+    volumes:
+      - ./CosyVoice:/app
+      - ./models/whisper:/models/whisper:ro
+      - ./.tmp-whisper-tokenizer:/models/whisper-tokenizer:ro
+
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TRANSFORMERS_OFFLINE=1
+      - CUDA_VISIBLE_DEVICES=0
+      - WHISPER_MODEL_DIR=/models/whisper
+      - WHISPER_TOKENIZER_DIR=/models/whisper-tokenizer
+      - WHISPER_DEVICE=${WHISPER_DEVICE:-cpu}
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    command: python server_v2.py --host 0.0.0.0 --port 8084
+    restart: "no"
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8084/health | grep -q '\"status\":\"ok\"'"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
+
+    networks:
+      - musetalk_network
+
+  # 轻量网关负责 LLM -> CosyVoice -> MuseTalk，不加载推理模型。
   musetalk-dev:
     build:
       context: .
@@ -50,51 +99,6 @@ services:
     networks:
       - musetalk_network
 
-  # MeloTTS 与 MuseTalk 共享 GPU；启动预热会把中文声学模型和 BERT 常驻显存。
-  melotts-dev:
-    build:
-      context: ./MeloTTS2
-      dockerfile: Dockerfile
-
-    container_name: melotts_dev
-    image: melotts2:dev
-
-    ports:
-      - "8084:8084"
-
-    volumes:
-      - ./MeloTTS2:/app
-
-    environment:
-      - PYTHONUNBUFFERED=1
-      - TRANSFORMERS_OFFLINE=1
-      - CUDA_VISIBLE_DEVICES=0
-      - MELOTTS_DEVICE=${MELOTTS_DEVICE:-cuda:0}
-      - MELOTTS_DEFAULT_LANGUAGE=${MELOTTS_DEFAULT_LANGUAGE:-ZH}
-      - MELOTTS_WARMUP_TEXT=${MELOTTS_WARMUP_TEXT:-你好。}
-
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-
-    command: uvicorn server:app --host 0.0.0.0 --port 8084
-    restart: "no"
-
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8084/health | grep -q '\"gpu_ready\":true'"]
-      interval: 20s
-      timeout: 5s
-      retries: 10
-      start_period: 120s
-
-    networks:
-      - musetalk_network
-
-  # 轻量网关负责 LLM -> MeloTTS -> MuseTalk，不加载推理模型。
   server-total-dev:
     build:
       context: .
@@ -116,7 +120,8 @@ services:
 
     environment:
       - PYTHONUNBUFFERED=1
-      - MELOTTS_URL=http://melotts-dev:8084
+      - COSYVOICE_URL=http://cosyvoice-dev:8084
+      - COSYVOICE_DEFAULT_VOICE=${COSYVOICE_DEFAULT_VOICE:-default_female}
       - MUSETALK_WS_URL=ws://musetalk-dev:8083/v1/stream
       - PIPELINE_REQUEST_TIMEOUT=${PIPELINE_REQUEST_TIMEOUT:-300}
       - PIPELINE_FIRST_UNIT_MIN_CHARS=${PIPELINE_FIRST_UNIT_MIN_CHARS:-12}
@@ -126,7 +131,7 @@ services:
     depends_on:
       musetalk-dev:
         condition: service_healthy
-      melotts-dev:
+      cosyvoice-dev:
         condition: service_healthy
     restart: "no"
 

@@ -1,6 +1,6 @@
 # AvatarLive-backend
 
-AvatarLive 的数字人后端，基于 MuseTalk，并集成实时推理、MeloTTS、LLM 编排及 Gradio 展示界面。
+AvatarLive 的数字人后端，基于 MuseTalk，并集成实时推理、CosyVoice 音色克隆、LLM 编排及 Gradio 展示界面。
 
 # MuseTalk
 
@@ -220,7 +220,7 @@ You can download weights in two ways:
 | ResNet-18 | [resnet18-5c106cde.pth](https://download.pytorch.org/models/resnet18-5c106cde.pth) | `models/face-parse-bisent/resnet18-5c106cde.pth` |
 | Robust Video Matting (可选抠图) | [PeterL1n/RobustVideoMatting](https://github.com/PeterL1n/RobustVideoMatting#download) | `models/rmbg_weight/rvm_resnet50.pth` |
 
-MeloTTS 服务还需要中英文声学模型与 BERT 权重，分别放在 `MeloTTS2/pretrained_model/EN/`、`MeloTTS2/pretrained_model/ZH/`、`MeloTTS2/bert_model/english_bert/` 和 `MeloTTS2/bert_model/multilingual/`。具体文件结构与语言映射见 [`MeloTTS2/README.md`](MeloTTS2/README.md)。
+CosyVoice 服务默认加载 `CosyVoice/pretrained_models/CosyVoice2-0.5B`。预置与克隆音色保存在 `CosyVoice/voice_library`，本地 Whisper 权重和 tokenizer 分别从 `models/whisper` 与 `.tmp-whisper-tokenizer` 挂载。
 
 #### Option 1: Using Download Scripts
 We provide two scripts for automatic downloading:

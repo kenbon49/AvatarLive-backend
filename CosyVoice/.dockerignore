@@ -1,0 +1,7 @@
+.git/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+pretrained_models/
+voice_library/clones/
+voice_library/presets/*/source.mp3

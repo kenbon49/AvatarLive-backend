@@ -7,14 +7,26 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import json
 import logging
+import math
 import os
 import time
 from typing import Any, Literal
 from uuid import uuid4
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.middleware.cors import CORSMiddleware
 import httpx
+import numpy as np
 from pydantic import BaseModel, Field, ValidationError
+from scipy.signal import resample_poly
 import websockets
 
 from llm_inference import LLMInferenceError, LiteLLMClient
@@ -24,8 +36,8 @@ from .segmenter import PunctuationSegmenter, TextUnit
 
 
 log = logging.getLogger("server-total")
-MELOTTS_URL = os.getenv("MELOTTS_URL", "http://localhost:8084").rstrip("/")
-MELOTTS_BERT_BACKEND = "pytorch"
+COSYVOICE_URL = os.getenv("COSYVOICE_URL", "http://localhost:8084").rstrip("/")
+DEFAULT_VOICE_ID = os.getenv("COSYVOICE_DEFAULT_VOICE", "default_female")
 MUSETALK_WS_URL = os.getenv("MUSETALK_WS_URL", "ws://localhost:8083/v1/stream")
 MUSETALK_BACKEND = "torch"
 MUSETALK_INFERENCE_DTYPE = "float32"
@@ -55,6 +67,7 @@ class AskRequest(BaseModel):
     request_id: str | None = Field(default=None, min_length=1, max_length=128)
     profile: AvatarProfile = DEFAULT_AVATAR_PROFILE
     language: Literal["ZH", "EN"] = "ZH"
+    voice_id: str | None = Field(default=None, min_length=1, max_length=64)
     speaker: str | None = None
     speed: float = Field(default=1.0, gt=0.25, le=3.0)
 
@@ -70,6 +83,7 @@ class SpeakRequest(BaseModel):
     request_id: str | None = Field(default=None, min_length=1, max_length=128)
     profile: AvatarProfile = DEFAULT_AVATAR_PROFILE
     language: Literal["ZH", "EN"] = "ZH"
+    voice_id: str | None = Field(default=None, min_length=1, max_length=64)
     speaker: str | None = None
     speed: float = Field(default=1.0, gt=0.25, le=3.0)
 
@@ -118,6 +132,15 @@ app = FastAPI(
     version="2.0.0",
     lifespan=lifespan,
 )
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        origin.strip() for origin in os.getenv("CORS_ORIGINS", "*").split(",")
+    ],
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/health")
@@ -132,8 +155,8 @@ async def health() -> dict[str, object]:
             "api_key_configured": bool(llm.api_key),
             "streaming": True,
         },
-        "melotts_url": MELOTTS_URL,
-        "melotts_bert_backend": MELOTTS_BERT_BACKEND,
+        "cosyvoice_url": COSYVOICE_URL,
+        "default_voice_id": DEFAULT_VOICE_ID,
         "musetalk_ws_url": MUSETALK_WS_URL,
         "musetalk_backend": MUSETALK_BACKEND,
         "musetalk_inference_dtype": MUSETALK_INFERENCE_DTYPE,
@@ -150,23 +173,77 @@ async def avatars() -> dict[str, object]:
     }
 
 
-async def synthesize_speech(app_: FastAPI, request: AskRequest, text: str) -> tuple[bytes, float]:
+@app.get("/v1/voices")
+async def voices() -> dict[str, object]:
+    try:
+        response = await app.state.http.get(f"{COSYVOICE_URL}/v1/speakers")
+        response.raise_for_status()
+        return response.json()
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"CosyVoice is unavailable: {exc}"
+        ) from exc
+
+
+@app.post("/v1/voices/clone", status_code=201)
+async def create_cloned_voice(
+    name: str = Form(..., min_length=1, max_length=80),
+    audio: UploadFile = File(...),
+) -> dict[str, object]:
+    content = await audio.read(50 * 1024 * 1024 + 1)
+    await audio.close()
+    if not content:
+        raise HTTPException(status_code=400, detail="audio is empty")
+    if len(content) > 50 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="audio exceeds the 50 MB limit")
+    response = await app.state.http.post(
+        f"{COSYVOICE_URL}/v1/voices/clone",
+        data={"name": name},
+        files={
+            "audio": (
+                audio.filename or "reference.wav",
+                content,
+                audio.content_type or "application/octet-stream",
+            )
+        },
+    )
+    if response.is_error:
+        try:
+            detail = response.json().get("detail", response.text)
+        except ValueError:
+            detail = response.text
+        raise HTTPException(status_code=response.status_code, detail=detail)
+    return response.json()
+
+
+async def synthesize_speech(
+    app_: FastAPI, request: AskRequest | SpeakRequest, text: str
+) -> tuple[bytes, float]:
+    voice_id = request.voice_id or request.speaker or DEFAULT_VOICE_ID
     response = await app_.state.http.post(
-        f"{MELOTTS_URL}/v1/synthesize",
-        json={
-            "text": text,
-            "language": request.language,
-            "speaker": request.speaker,
+        f"{COSYVOICE_URL}/v1/voice-clone",
+        data={
+            "tts_text": text,
+            "speaker_id": voice_id,
+            "stream": "true",
             "speed": request.speed,
-            "sample_rate": 16000,
-            "bert_backend": MELOTTS_BERT_BACKEND,
         },
     )
     response.raise_for_status()
     pcm = response.content
     if not pcm or len(pcm) % 2:
-        raise RuntimeError("MeloTTS returned invalid PCM audio")
-    duration = float(response.headers.get("X-Duration-Seconds", len(pcm) / 32000.0))
+        raise RuntimeError("CosyVoice returned invalid PCM audio")
+    if response.headers.get("X-Audio-Sample-Format") != "s16le":
+        raise RuntimeError("CosyVoice returned an unsupported audio format")
+    source_rate = int(response.headers.get("X-Audio-Sample-Rate", "0"))
+    if source_rate <= 0:
+        raise RuntimeError("CosyVoice did not report its sample rate")
+    if source_rate != 16000:
+        divisor = math.gcd(source_rate, 16000)
+        samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32)
+        samples = resample_poly(samples, 16000 // divisor, source_rate // divisor)
+        pcm = np.clip(np.rint(samples), -32768, 32767).astype("<i2").tobytes()
+    duration = len(pcm) / 32000.0
     return pcm, duration
 
 
@@ -358,7 +435,9 @@ async def _render_units(
             packet_count = 0
             text_unit_sent = False
             while True:
-                message = await asyncio.wait_for(upstream.recv(), timeout=REQUEST_TIMEOUT)
+                message = await asyncio.wait_for(
+                    upstream.recv(), timeout=REQUEST_TIMEOUT
+                )
                 if isinstance(message, bytes):
                     if not text_unit_sent:
                         await sender.send_json(
@@ -421,14 +500,20 @@ async def run_pipeline(
     request: AskRequest | SpeakRequest,
     request_id: str | None = None,
 ) -> None:
-    sender = websocket if isinstance(websocket, FrontendSender) else FrontendSender(websocket)
+    sender = (
+        websocket
+        if isinstance(websocket, FrontendSender)
+        else FrontendSender(websocket)
+    )
     resolved_request_id = request_id or request.request_id or uuid4().hex
     started_at = time.perf_counter()
     kind = request.type
     text_queue: asyncio.Queue[TextUnit | object] = asyncio.Queue(
         maxsize=SENTENCE_QUEUE_SIZE
     )
-    audio_queue: asyncio.Queue[AudioUnit | object] = asyncio.Queue(maxsize=AUDIO_QUEUE_SIZE)
+    audio_queue: asyncio.Queue[AudioUnit | object] = asyncio.Queue(
+        maxsize=AUDIO_QUEUE_SIZE
+    )
     await sender.send_json(
         {
             "type": "conversation_start",
@@ -442,7 +527,9 @@ async def run_pipeline(
 
     tasks = [
         asyncio.create_task(
-            _produce_text_units(sender, request, resolved_request_id, text_queue, kind=kind)
+            _produce_text_units(
+                sender, request, resolved_request_id, text_queue, kind=kind
+            )
         ),
         asyncio.create_task(
             _synthesize_units(
@@ -512,7 +599,7 @@ async def _run_and_report(
         )
     except httpx.HTTPStatusError as exc:
         detail = exc.response.text[:500]
-        log.exception("MeloTTS request failed")
+        log.exception("CosyVoice request failed")
         await sender.send_json(
             {
                 "type": "error",
@@ -547,6 +634,8 @@ async def _run_and_report(
                 "cancelled": False,
             }
         )
+
+
 @app.websocket("/v1/conversation")
 async def conversation(websocket: WebSocket) -> None:
     await websocket.accept()
@@ -608,7 +697,9 @@ async def conversation(websocket: WebSocket) -> None:
 
             if message_type == "ask":
                 try:
-                    request: AskRequest | SpeakRequest = AskRequest.model_validate(payload)
+                    request: AskRequest | SpeakRequest = AskRequest.model_validate(
+                        payload
+                    )
                 except ValidationError as exc:
                     await sender.send_json(
                         {"type": "error", "stage": "request", "message": str(exc)}

@@ -18,6 +18,7 @@ exp_out
 .gradio
 .env
 **/.env
+*.env.example
 .claude/
 .tmp-*/
 gradio_demo/
@@ -34,3 +35,8 @@ cache/
 MeloTTS2/bert_model/
 MeloTTS2/pretrained_model/
 MeloTTS2/onnx_models/
+CosyVoice/pretrained_models/
+
+*.pyc
+CosyVoice/cosyvoice/__pycache__/
+CosyVoice/cosyvoice/*/_pycache/

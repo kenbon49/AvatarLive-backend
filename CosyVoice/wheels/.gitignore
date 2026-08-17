@@ -1,0 +1,3 @@
+# Keep downloaded package archives out of version control.
+*
+!.gitignore

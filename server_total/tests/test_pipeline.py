@@ -66,8 +66,11 @@ class FakeUpstream:
 
 
 class FakeHttpResponse:
-    content = b"\x00\x00\x01\x00"
-    headers = {"X-Duration-Seconds": "0.125"}
+    content = bytes(4000)
+    headers = {
+        "X-Audio-Sample-Rate": "16000",
+        "X-Audio-Sample-Format": "s16le",
+    }
 
     def raise_for_status(self):
         return None
@@ -77,8 +80,8 @@ class FakeHttpClient:
     def __init__(self) -> None:
         self.request = None
 
-    async def post(self, url, json):
-        self.request = (url, json)
+    async def post(self, url, **kwargs):
+        self.request = (url, kwargs)
         return FakeHttpResponse()
 
 
@@ -88,8 +91,12 @@ class FakeLLM:
         yield "图像。"
 
 
-def media_packet(sequence: int = 9, pts_us: int = 0, payload: bytes = b"media") -> bytes:
-    return PACKET_HEADER.pack(b"MSTK", 1, 1, 0, sequence, len(payload), pts_us) + payload
+def media_packet(
+    sequence: int = 9, pts_us: int = 0, payload: bytes = b"media"
+) -> bytes:
+    return (
+        PACKET_HEADER.pack(b"MSTK", 1, 1, 0, sequence, len(payload), pts_us) + payload
+    )
 
 
 class PipelineTests(unittest.IsolatedAsyncioTestCase):
@@ -138,9 +145,38 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         pcm, duration = await synthesize_speech(fake_app, request, "简短回答")
         self.assertEqual(pcm, FakeHttpResponse.content)
         self.assertEqual(duration, 0.125)
-        self.assertEqual(http.request[1]["sample_rate"], 16000)
-        self.assertEqual(http.request[1]["text"], "简短回答")
-        self.assertEqual(http.request[1]["bert_backend"], "pytorch")
+        self.assertEqual(http.request[1]["data"]["speaker_id"], "default_female")
+        self.assertEqual(http.request[1]["data"]["tts_text"], "简短回答")
+        self.assertEqual(http.request[1]["data"]["stream"], "true")
+
+    async def test_synthesize_resamples_cosyvoice_pcm_and_forwards_voice_id(self):
+        class NativeRateResponse(FakeHttpResponse):
+            content = bytes(4800)
+            headers = {
+                "X-Audio-Sample-Rate": "24000",
+                "X-Audio-Sample-Format": "s16le",
+            }
+
+        class NativeRateClient(FakeHttpClient):
+            async def post(self, url, **kwargs):
+                self.request = (url, kwargs)
+                return NativeRateResponse()
+
+        http = NativeRateClient()
+        fake_app = SimpleNamespace(state=SimpleNamespace(http=http))
+        request = AskRequest(
+            type="ask",
+            question="你好",
+            voice_id="customer_service_female",
+        )
+
+        pcm, duration = await synthesize_speech(fake_app, request, "采样率测试")
+
+        self.assertEqual(len(pcm), 3200)
+        self.assertEqual(duration, 0.1)
+        self.assertEqual(
+            http.request[1]["data"]["speaker_id"], "customer_service_female"
+        )
 
     async def test_pipeline_streams_each_text_unit_through_tts_and_musetalk(self):
         upstream = FakeUpstream(
@@ -170,7 +206,9 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
 
         from server_total import app as app_module
 
-        previous_llm = app_module.app.state.llm if hasattr(app_module.app.state, "llm") else None
+        previous_llm = (
+            app_module.app.state.llm if hasattr(app_module.app.state, "llm") else None
+        )
         app_module.app.state.llm = FakeLLM()
         try:
             with (
@@ -188,7 +226,9 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             [call.args[2] for call in synthesize.await_args_list],
             ["人工智能能够快速处理数据，", "识别图像。"],
         )
-        text_units = [item for item in frontend.json_messages if item["type"] == "text_unit"]
+        text_units = [
+            item for item in frontend.json_messages if item["type"] == "text_unit"
+        ]
         self.assertEqual(
             [(item["seq"], item["text"], item["delimiter"]) for item in text_units],
             [(0, "人工智能能够快速处理数据，", "，"), (1, "识别图像。", "。")],
@@ -200,7 +240,9 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(next_message["type"], "stream_start")
             self.assertEqual(next_message["segment_seq"], text_unit["seq"])
         self.assertEqual(len(frontend.binary_messages), 2)
-        ready = next(item for item in frontend.json_messages if item["type"] == "musetalk_ready")
+        ready = next(
+            item for item in frontend.json_messages if item["type"] == "musetalk_ready"
+        )
         self.assertEqual(ready["backend"], "torch")
         self.assertEqual(ready["inference_dtype"], "float32")
         first = PACKET_HEADER.unpack_from(frontend.binary_messages[0])
@@ -209,9 +251,13 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((second[4], second[6]), (1, 120_000))
         self.assertEqual(frontend.json_messages[-1]["type"], "conversation_end")
         self.assertEqual(frontend.json_messages[-1]["units"], 2)
-        commits = [item for item in upstream.sent if isinstance(item, str) and "commit" in item]
+        commits = [
+            item for item in upstream.sent if isinstance(item, str) and "commit" in item
+        ]
         self.assertEqual(len(commits), 2)
-        starts = [item for item in upstream.sent if isinstance(item, str) and "start" in item]
+        starts = [
+            item for item in upstream.sent if isinstance(item, str) and "start" in item
+        ]
         self.assertEqual(len(starts), 2)
         self.assertTrue(all('"profile": "business_male_1"' in item for item in starts))
 
@@ -229,7 +275,9 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
 
         from server_total import app as app_module
 
-        previous_llm = app_module.app.state.llm if hasattr(app_module.app.state, "llm") else None
+        previous_llm = (
+            app_module.app.state.llm if hasattr(app_module.app.state, "llm") else None
+        )
         app_module.app.state.llm = FakeLLM()
         try:
             with (
@@ -272,12 +320,16 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cancelled[0]["request_id"], "request-3")
 
     async def test_idle_messages_do_not_start_musetalk_inference(self):
-        websocket = FakeConversationSocket([{"type": "idle_start", "profile": "chinese"}])
+        websocket = FakeConversationSocket(
+            [{"type": "idle_start", "profile": "chinese"}]
+        )
         with patch("server_total.app.websockets.connect") as connect:
             await conversation(websocket)
 
         connect.assert_not_called()
-        error = next(item for item in websocket.json_messages if item.get("type") == "error")
+        error = next(
+            item for item in websocket.json_messages if item.get("type") == "error"
+        )
         self.assertIn("unknown message type", error["message"])
 
     def test_remap_media_packet_rewrites_sequence_and_pts(self):
