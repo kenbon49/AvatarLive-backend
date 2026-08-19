@@ -17,6 +17,7 @@ from typing import Any, Dict, Iterator, Optional
 
 import numpy as np
 import torch
+import torchaudio
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -213,6 +214,7 @@ def pcm_stream(
     prompt_wav: Path,
     stream: bool,
     speed: float,
+    output_sample_rate: Optional[int] = None,
     zero_shot_spk_id: str = "",
     temp_prompt: Optional[Path] = None,
 ) -> Iterator[bytes]:
@@ -239,7 +241,14 @@ def pcm_stream(
                 speed=speed,
             )
             for output in outputs:
-                speech = output["tts_speech"].detach().cpu().numpy()
+                speech = output["tts_speech"].detach().cpu()
+                if output_sample_rate and output_sample_rate != model.sample_rate:
+                    speech = torchaudio.functional.resample(
+                        speech,
+                        model.sample_rate,
+                        output_sample_rate,
+                    )
+                speech = speech.numpy()
                 pcm = (np.clip(speech, -1.0, 1.0) * 32767.0).astype("<i2")
                 yield pcm.tobytes()
     finally:
@@ -315,6 +324,7 @@ async def voice_clone(
     prompt_wav: Optional[UploadFile] = File(None),
     stream: bool = Form(True),
     speed: float = Form(1.0),
+    output_sample_rate: Optional[int] = Form(None),
 ) -> StreamingResponse:
     tts_text = tts_text.strip()
     speaker_id = speaker_id.strip() if speaker_id else None
@@ -323,6 +333,11 @@ async def voice_clone(
         raise HTTPException(status_code=400, detail="tts_text must not be empty")
     if speed <= 0:
         raise HTTPException(status_code=400, detail="speed must be greater than zero")
+    if output_sample_rate is not None and not 8000 <= output_sample_rate <= 48000:
+        raise HTTPException(
+            status_code=400,
+            detail="output_sample_rate must be between 8000 and 48000",
+        )
     if stream and speed != 1.0:
         raise HTTPException(
             status_code=400,
@@ -357,7 +372,7 @@ async def voice_clone(
 
     if state.model is None:
         raise HTTPException(status_code=503, detail="model is not loaded")
-    sample_rate = state.model.sample_rate
+    sample_rate = output_sample_rate or state.model.sample_rate
     headers = {
         "X-Audio-Sample-Rate": str(sample_rate),
         "X-Audio-Channels": "1",
@@ -370,8 +385,9 @@ async def voice_clone(
         selected_wav,
         stream,
         speed,
-        selected_speaker_id,
-        temp_prompt,
+        output_sample_rate=sample_rate,
+        zero_shot_spk_id=selected_speaker_id,
+        temp_prompt=temp_prompt,
     )
     try:
         # Generate the first audio block before sending HTTP 200. This converts
@@ -402,7 +418,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-dir",
         default=str(ROOT_DIR / "pretrained_models" / "Fun-CosyVoice3-0.5B"),
-        help="local CosyVoice2/3 directory or ModelScope model id",
+        help="local CosyVoice2/3 model directory",
     )
     parser.add_argument(
         "--voice-manifest",

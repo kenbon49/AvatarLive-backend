@@ -82,12 +82,21 @@ class CosyVoiceModel:
 
     def load_trt(self, flow_decoder_estimator_model, flow_decoder_onnx_model, trt_concurrent, fp16):
         assert torch.cuda.is_available(), 'tensorrt only supports gpu!'
-        if not os.path.exists(flow_decoder_estimator_model) or os.path.getsize(flow_decoder_estimator_model) == 0:
-            convert_onnx_to_trt(flow_decoder_estimator_model, self.get_trt_kwargs(), flow_decoder_onnx_model, fp16)
-        del self.flow.decoder.estimator
         import tensorrt as trt
-        with open(flow_decoder_estimator_model, 'rb') as f:
-            estimator_engine = trt.Runtime(trt.Logger(trt.Logger.INFO)).deserialize_cuda_engine(f.read())
+
+        estimator_engine = None
+        if os.path.exists(flow_decoder_estimator_model) and os.path.getsize(flow_decoder_estimator_model) > 0:
+            with open(flow_decoder_estimator_model, 'rb') as f:
+                estimator_engine = trt.Runtime(trt.Logger(trt.Logger.INFO)).deserialize_cuda_engine(f.read())
+            if estimator_engine is None:
+                logging.warning('invalid or incompatible TensorRT plan, rebuilding %s', flow_decoder_estimator_model)
+
+        if estimator_engine is None:
+            convert_onnx_to_trt(flow_decoder_estimator_model, self.get_trt_kwargs(), flow_decoder_onnx_model, fp16)
+            with open(flow_decoder_estimator_model, 'rb') as f:
+                estimator_engine = trt.Runtime(trt.Logger(trt.Logger.INFO)).deserialize_cuda_engine(f.read())
+
+        del self.flow.decoder.estimator
         assert estimator_engine is not None, 'failed to load trt {}'.format(flow_decoder_estimator_model)
         self.flow.decoder.estimator = TrtContextWrapper(estimator_engine, trt_concurrent=trt_concurrent, device=self.device)
 
@@ -280,7 +289,14 @@ class CosyVoice2Model(CosyVoiceModel):
 
     def load_vllm(self, model_dir):
         export_cosyvoice2_vllm(self.llm, model_dir, self.device)
-        from vllm import EngineArgs, LLMEngine
+        from vllm import EngineArgs, LLMEngine, ModelRegistry
+
+        # The exported config names CosyVoice2ForCausalLM, which is provided by
+        # this project rather than vLLM's built-in model registry.
+        ModelRegistry.register_model(
+            "CosyVoice2ForCausalLM",
+            "cosyvoice.vllm.cosyvoice2:CosyVoice2ForCausalLM",
+        )
         engine_args = EngineArgs(model=model_dir,
                                  skip_tokenizer_init=True,
                                  enable_prompt_embeds=True,

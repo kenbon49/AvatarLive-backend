@@ -22,6 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt /tmp/cosyvoice-requirements.txt
 # openai-whisper 20231117 imports pkg_resources, which was removed in newer setuptools.
 # Keep build isolation for TensorRT and the remaining dependencies, which need it.
+# The repository-provided ONNX wheels are installed directly during this step.
 # NVIDIA is the sole index for TensorRT because PyPI mirrors carry installer stubs.
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=wheels,target=/tmp/tensorrt-wheels,readonly \
@@ -30,6 +31,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         /tmp/tensorrt-wheels/tensorrt_cu12_libs-10.13.3.9-py2.py3-none-manylinux_2_28_x86_64.whl \
         "tensorrt-cu12==10.13.3.9" \
         "tensorrt-cu12-bindings==10.13.3.9" \
+    && python -m pip install --no-deps \
+        /tmp/tensorrt-wheels/onnx-1.16.0-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl \
+        /tmp/tensorrt-wheels/onnxruntime_gpu-1.18.0-cp310-cp310-manylinux_2_28_x86_64.whl \
     && python -m pip install --index-url "${PIP_INDEX_URL}" --no-build-isolation \
         --retries 12 --timeout 300 "openai-whisper==20231117" \
     && python -m pip install --index-url "${PIP_INDEX_URL}" --retries 12 --timeout 300 \

@@ -21,13 +21,20 @@ class TextUnit:
 class PunctuationSegmenter:
     """Split immediately at sentence endings and coalesce short comma clauses."""
 
-    def __init__(self, *, first_unit_min_chars: int = 12, target_unit_chars: int = 20) -> None:
+    def __init__(
+        self,
+        *,
+        first_unit_min_chars: int = 12,
+        target_unit_chars: int = 20,
+        coalesce_hard_delimiters: bool = False,
+    ) -> None:
         if first_unit_min_chars < 1 or target_unit_chars < 1:
             raise ValueError("segment lengths must be positive")
         self._buffer = ""
         self._next_seq = 0
         self.first_unit_min_chars = int(first_unit_min_chars)
         self.target_unit_chars = int(target_unit_chars)
+        self.coalesce_hard_delimiters = bool(coalesce_hard_delimiters)
 
     def feed(self, delta: str) -> list[TextUnit]:
         if delta:
@@ -77,7 +84,7 @@ class PunctuationSegmenter:
                 break
             if end == len(self._buffer) and not final:
                 return None
-            if char in SOFT_DELIMITERS:
+            if char in SOFT_DELIMITERS or self.coalesce_hard_delimiters:
                 minimum = (
                     self.first_unit_min_chars if self._next_seq == 0 else self.target_unit_chars
                 )

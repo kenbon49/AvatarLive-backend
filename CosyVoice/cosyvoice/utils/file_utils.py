@@ -82,9 +82,21 @@ def convert_onnx_to_trt(trt_model, trt_kwargs, onnx_model, fp16):
         output_tensor.dtype = tensor_dtype
     config.add_optimization_profile(profile)
     engine_bytes = builder.build_serialized_network(network, config)
-    # save trt engine
-    with open(trt_model, "wb") as f:
-        f.write(engine_bytes)
+    if engine_bytes is None:
+        raise RuntimeError('TensorRT failed to build {}'.format(onnx_model))
+
+    # Publish only a complete engine. An interrupted build must not leave a
+    # non-empty plan that the next startup mistakes for a valid cache.
+    temp_trt_model = '{}.tmp-{}'.format(trt_model, os.getpid())
+    try:
+        with open(temp_trt_model, "wb") as f:
+            f.write(engine_bytes)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_trt_model, trt_model)
+    finally:
+        if os.path.exists(temp_trt_model):
+            os.remove(temp_trt_model)
     logging.info("Succesfully convert onnx to trt...")
 
 

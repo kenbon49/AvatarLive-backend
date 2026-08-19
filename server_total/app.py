@@ -10,7 +10,7 @@ import logging
 import math
 import os
 import time
-from typing import Any, Literal
+from typing import Any, AsyncIterator, Literal
 from uuid import uuid4
 
 from fastapi import (
@@ -44,9 +44,14 @@ MUSETALK_INFERENCE_DTYPE = "float32"
 REQUEST_TIMEOUT = float(os.getenv("PIPELINE_REQUEST_TIMEOUT", "300"))
 PCM_CHUNK_BYTES = 64 * 1024
 SENTENCE_QUEUE_SIZE = int(os.getenv("PIPELINE_TEXT_QUEUE_SIZE", "4"))
-AUDIO_QUEUE_SIZE = int(os.getenv("PIPELINE_AUDIO_QUEUE_SIZE", "2"))
-FIRST_UNIT_MIN_CHARS = int(os.getenv("PIPELINE_FIRST_UNIT_MIN_CHARS", "12"))
-TARGET_UNIT_CHARS = int(os.getenv("PIPELINE_TARGET_UNIT_CHARS", "20"))
+AUDIO_QUEUE_SIZE = int(os.getenv("PIPELINE_AUDIO_QUEUE_SIZE", "12"))
+TTS_STREAM_CHUNK_SECONDS = float(os.getenv("PIPELINE_TTS_CHUNK_SECONDS", "1.0"))
+PLAYBACK_BUFFER_SECONDS = float(os.getenv("PIPELINE_PLAYBACK_BUFFER_SECONDS", "6.0"))
+FIRST_UNIT_MIN_CHARS = int(os.getenv("PIPELINE_FIRST_UNIT_MIN_CHARS", "40"))
+TARGET_UNIT_CHARS = int(os.getenv("PIPELINE_TARGET_UNIT_CHARS", "60"))
+COALESCE_HARD_DELIMITERS = os.getenv(
+    "PIPELINE_COALESCE_HARD_DELIMITERS", "1"
+).lower() not in {"0", "false", "no"}
 _END = object()
 AvatarProfile = Literal[
     "chinese",
@@ -93,6 +98,14 @@ class AudioUnit:
     unit: TextUnit
     pcm: bytes
     duration: float
+    chunk_index: int
+
+
+@dataclass(frozen=True)
+class AudioUnitEnd:
+    unit: TextUnit
+    duration: float
+    chunks: int
 
 
 @dataclass
@@ -162,6 +175,7 @@ async def health() -> dict[str, object]:
         "musetalk_inference_dtype": MUSETALK_INFERENCE_DTYPE,
         "default_avatar": DEFAULT_AVATAR_PROFILE,
         "avatars": AVATAR_CATALOG,
+        "playback_buffer_seconds": PLAYBACK_BUFFER_SECONDS,
     }
 
 
@@ -216,35 +230,61 @@ async def create_cloned_voice(
     return response.json()
 
 
-async def synthesize_speech(
+async def stream_speech_chunks(
     app_: FastAPI, request: AskRequest | SpeakRequest, text: str
-) -> tuple[bytes, float]:
+) -> AsyncIterator[tuple[bytes, float]]:
     voice_id = request.voice_id or request.speaker or DEFAULT_VOICE_ID
-    response = await app_.state.http.post(
+    async with app_.state.http.stream(
+        "POST",
         f"{COSYVOICE_URL}/v1/voice-clone",
         data={
             "tts_text": text,
             "speaker_id": voice_id,
-            "stream": "true",
+            "stream": str(request.speed == 1.0).lower(),
             "speed": request.speed,
+            "output_sample_rate": 16000,
         },
-    )
-    response.raise_for_status()
-    pcm = response.content
-    if not pcm or len(pcm) % 2:
-        raise RuntimeError("CosyVoice returned invalid PCM audio")
-    if response.headers.get("X-Audio-Sample-Format") != "s16le":
-        raise RuntimeError("CosyVoice returned an unsupported audio format")
-    source_rate = int(response.headers.get("X-Audio-Sample-Rate", "0"))
-    if source_rate <= 0:
-        raise RuntimeError("CosyVoice did not report its sample rate")
-    if source_rate != 16000:
-        divisor = math.gcd(source_rate, 16000)
-        samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32)
-        samples = resample_poly(samples, 16000 // divisor, source_rate // divisor)
-        pcm = np.clip(np.rint(samples), -32768, 32767).astype("<i2").tobytes()
-    duration = len(pcm) / 32000.0
-    return pcm, duration
+    ) as response:
+        if response.is_error:
+            await response.aread()
+        response.raise_for_status()
+        if response.headers.get("X-Audio-Sample-Format") != "s16le":
+            raise RuntimeError("CosyVoice returned an unsupported audio format")
+        source_rate = int(response.headers.get("X-Audio-Sample-Rate", "0"))
+        if source_rate <= 0:
+            raise RuntimeError("CosyVoice did not report its sample rate")
+        chunk_bytes = max(2, round(source_rate * 2 * TTS_STREAM_CHUNK_SECONDS))
+        chunk_bytes -= chunk_bytes % 2
+        async for pcm in response.aiter_bytes(chunk_size=chunk_bytes):
+            if not pcm or len(pcm) % 2:
+                raise RuntimeError("CosyVoice returned invalid PCM audio")
+            if source_rate != 16000:
+                divisor = math.gcd(source_rate, 16000)
+                samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32)
+                samples = resample_poly(
+                    samples,
+                    16000 // divisor,
+                    source_rate // divisor,
+                )
+                pcm = (
+                    np.clip(np.rint(samples), -32768, 32767)
+                    .astype("<i2")
+                    .tobytes()
+                )
+            yield pcm, len(pcm) / 32000.0
+
+
+async def synthesize_speech(
+    app_: FastAPI, request: AskRequest | SpeakRequest, text: str
+) -> tuple[bytes, float]:
+    chunks: list[bytes] = []
+    duration = 0.0
+    async for pcm, chunk_duration in stream_speech_chunks(app_, request, text):
+        chunks.append(pcm)
+        duration += chunk_duration
+    if not chunks:
+        raise RuntimeError("CosyVoice returned empty PCM audio")
+    return b"".join(chunks), duration
 
 
 def _next_or_end(iterator: Any) -> Any:
@@ -265,6 +305,7 @@ async def _produce_text_units(
     segmenter = PunctuationSegmenter(
         first_unit_min_chars=FIRST_UNIT_MIN_CHARS,
         target_unit_chars=TARGET_UNIT_CHARS,
+        coalesce_hard_delimiters=COALESCE_HARD_DELIMITERS,
     )
     answer_parts: list[str] = []
 
@@ -307,7 +348,7 @@ async def _synthesize_units(
     request: AskRequest | SpeakRequest,
     request_id: str,
     text_queue: asyncio.Queue[TextUnit | object],
-    audio_queue: asyncio.Queue[AudioUnit | object],
+    audio_queue: asyncio.Queue[AudioUnit | AudioUnitEnd | object],
 ) -> int:
     count = 0
     while True:
@@ -325,7 +366,18 @@ async def _synthesize_units(
                 "text": item.text,
             }
         )
-        pcm, duration = await synthesize_speech(app, request, item.text)
+        duration = 0.0
+        chunks = 0
+        async for pcm, chunk_duration in stream_speech_chunks(
+            app, request, item.text
+        ):
+            await audio_queue.put(
+                AudioUnit(item, pcm, chunk_duration, chunk_index=chunks)
+            )
+            duration += chunk_duration
+            chunks += 1
+        if chunks == 0:
+            raise RuntimeError("CosyVoice returned empty PCM audio")
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         await sender.send_json(
             {
@@ -335,9 +387,10 @@ async def _synthesize_units(
                 "text": item.text,
                 "duration_seconds": round(duration, 3),
                 "elapsed_ms": elapsed_ms,
+                "chunks": chunks,
             }
         )
-        await audio_queue.put(AudioUnit(item, pcm, duration))
+        await audio_queue.put(AudioUnitEnd(item, duration, chunks))
         count += 1
     await audio_queue.put(_END)
     return count
@@ -348,7 +401,7 @@ async def _handshake_upstream(
     sender: FrontendSender,
     request: AskRequest | SpeakRequest,
     request_id: str,
-) -> None:
+) -> float:
     """Wait for MuseTalk readiness, validate the backend, and report to the frontend."""
     initial_raw = await asyncio.wait_for(upstream.recv(), timeout=REQUEST_TIMEOUT)
     if not isinstance(initial_raw, str):
@@ -368,24 +421,26 @@ async def _handshake_upstream(
             f"MuseTalk dtype mismatch: expected {MUSETALK_INFERENCE_DTYPE}, "
             f"got {upstream_dtype or 'unknown'}"
         )
+    fps = float(initial.get("fps", 25))
     await sender.send_json(
         {
             "type": "musetalk_ready",
             "request_id": request_id,
             "profile": request.profile,
-            "fps": initial.get("fps", 25),
+            "fps": fps,
             "sample_rate": 16000,
             "backend": upstream_backend,
             "inference_dtype": upstream_dtype,
         }
     )
+    return fps
 
 
 async def _render_units(
     sender: FrontendSender,
     request: AskRequest | SpeakRequest,
     request_id: str,
-    audio_queue: asyncio.Queue[AudioUnit | object],
+    audio_queue: asyncio.Queue[AudioUnit | AudioUnitEnd | object],
     *,
     timeline: MediaTimeline | None = None,
 ) -> int:
@@ -398,33 +453,59 @@ async def _render_units(
         ping_timeout=None,
         max_size=None,
     ) as upstream:
-        await _handshake_upstream(upstream, sender, request, request_id)
+        fps = await _handshake_upstream(
+            upstream, sender, request, request_id
+        )
+        active_unit: TextUnit | None = None
+        active_packet_count = 0
 
         while True:
             item = await audio_queue.get()
             if item is _END:
                 break
+            if isinstance(item, AudioUnitEnd):
+                if active_unit is None or active_unit.seq != item.unit.seq:
+                    raise RuntimeError("audio unit ended without an active segment")
+                await sender.send_json(
+                    {
+                        "type": "segment_end",
+                        "request_id": request_id,
+                        "seq": item.unit.seq,
+                        "text": item.unit.text,
+                        "duration_seconds": round(item.duration, 3),
+                        "chunks": item.chunks,
+                        "packets": active_packet_count,
+                    }
+                )
+                active_unit = None
+                active_packet_count = 0
+                rendered += 1
+                continue
             if not isinstance(item, AudioUnit):
                 raise TypeError("audio queue received an invalid item")
             unit = item.unit
-            await sender.send_json(
-                {
-                    "type": "segment_start",
-                    "request_id": request_id,
-                    "seq": unit.seq,
-                    "text": unit.text,
-                    "delimiter": unit.delimiter,
-                    "pts_us": timeline.pts_offset_us,
-                }
-            )
+            if item.chunk_index == 0:
+                if active_unit is not None:
+                    raise RuntimeError("new audio segment started before the previous end")
+                active_unit = unit
+                await sender.send_json(
+                    {
+                        "type": "segment_start",
+                        "request_id": request_id,
+                        "seq": unit.seq,
+                        "text": unit.text,
+                        "delimiter": unit.delimiter,
+                        "pts_us": timeline.pts_offset_us,
+                    }
+                )
+            elif active_unit is None or active_unit.seq != unit.seq:
+                raise RuntimeError("audio chunk does not match the active segment")
             await upstream.send(
                 json.dumps(
                     {
                         "type": "start",
                         "profile": request.profile,
-                        # A multi-sentence answer shares one upstream connection.
-                        # Continue its action sequence after the first sentence.
-                        "continue_from_previous": unit.seq > 0,
+                        "continue_from_previous": timeline.sequence > 0,
                     }
                 )
             )
@@ -433,7 +514,7 @@ async def _render_units(
             await upstream.send(json.dumps({"type": "commit"}))
 
             packet_count = 0
-            text_unit_sent = False
+            text_unit_sent = item.chunk_index > 0
             while True:
                 message = await asyncio.wait_for(
                     upstream.recv(), timeout=REQUEST_TIMEOUT
@@ -475,23 +556,20 @@ async def _render_units(
                         }
                     )
                     text_unit_sent = True
-                control.update({"request_id": request_id, "segment_seq": unit.seq})
+                control.update(
+                    {
+                        "request_id": request_id,
+                        "segment_seq": unit.seq,
+                        "chunk_index": item.chunk_index,
+                    }
+                )
                 await sender.send_json(control)
                 if control.get("type") == "stream_end":
                     break
 
-            await sender.send_json(
-                {
-                    "type": "segment_end",
-                    "request_id": request_id,
-                    "seq": unit.seq,
-                    "text": unit.text,
-                    "duration_seconds": round(item.duration, 3),
-                    "packets": packet_count,
-                }
-            )
-            timeline.pts_offset_us += round(len(item.pcm) / 2 / 16000 * 1_000_000)
-            rendered += 1
+            active_packet_count += packet_count
+            rendered_frames = math.floor(len(item.pcm) / 2 / 16000 * fps)
+            timeline.pts_offset_us += round(rendered_frames / fps * 1_000_000)
     return rendered
 
 
@@ -511,7 +589,7 @@ async def run_pipeline(
     text_queue: asyncio.Queue[TextUnit | object] = asyncio.Queue(
         maxsize=SENTENCE_QUEUE_SIZE
     )
-    audio_queue: asyncio.Queue[AudioUnit | object] = asyncio.Queue(
+    audio_queue: asyncio.Queue[AudioUnit | AudioUnitEnd | object] = asyncio.Queue(
         maxsize=AUDIO_QUEUE_SIZE
     )
     await sender.send_json(
@@ -646,6 +724,7 @@ async def conversation(websocket: WebSocket) -> None:
             "protocol": "MSTK/2",
             "packet_header": "<4sBBHIIQ",
             "sample_rate": 16000,
+            "playback_buffer_seconds": PLAYBACK_BUFFER_SECONDS,
             "default_profile": DEFAULT_AVATAR_PROFILE,
             "avatars": AVATAR_CATALOG,
         }

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from fastapi import WebSocketDisconnect
 from pydantic import ValidationError
@@ -67,6 +67,7 @@ class FakeUpstream:
 
 class FakeHttpResponse:
     content = bytes(4000)
+    is_error = False
     headers = {
         "X-Audio-Sample-Rate": "16000",
         "X-Audio-Sample-Format": "s16le",
@@ -74,6 +75,22 @@ class FakeHttpResponse:
 
     def raise_for_status(self):
         return None
+
+    async def aiter_bytes(self, chunk_size=None):
+        size = chunk_size or len(self.content)
+        for offset in range(0, len(self.content), size):
+            yield self.content[offset : offset + size]
+
+
+class FakeStreamContext:
+    def __init__(self, response):
+        self.response = response
+
+    async def __aenter__(self):
+        return self.response
+
+    async def __aexit__(self, *_args):
+        return False
 
 
 class FakeHttpClient:
@@ -83,6 +100,10 @@ class FakeHttpClient:
     async def post(self, url, **kwargs):
         self.request = (url, kwargs)
         return FakeHttpResponse()
+
+    def stream(self, _method, url, **kwargs):
+        self.request = (url, kwargs)
+        return FakeStreamContext(FakeHttpResponse())
 
 
 class FakeLLM:
@@ -148,6 +169,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(http.request[1]["data"]["speaker_id"], "default_female")
         self.assertEqual(http.request[1]["data"]["tts_text"], "简短回答")
         self.assertEqual(http.request[1]["data"]["stream"], "true")
+        self.assertEqual(http.request[1]["data"]["output_sample_rate"], 16000)
 
     async def test_synthesize_resamples_cosyvoice_pcm_and_forwards_voice_id(self):
         class NativeRateResponse(FakeHttpResponse):
@@ -158,9 +180,9 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             }
 
         class NativeRateClient(FakeHttpClient):
-            async def post(self, url, **kwargs):
+            def stream(self, _method, url, **kwargs):
                 self.request = (url, kwargs)
-                return NativeRateResponse()
+                return FakeStreamContext(NativeRateResponse())
 
         http = NativeRateClient()
         fake_app = SimpleNamespace(state=SimpleNamespace(http=http))
@@ -190,7 +212,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 '{"type":"started","profile":"business_male_1"}',
                 '{"type":"queued","profile":"business_male_1"}',
                 '{"type":"stream_start"}',
-                media_packet(7, 20_000, b"second"),
+                media_packet(6, 10_000, b"first-cont"),
                 '{"type":"stream_end","packets":1}',
             ]
         )
@@ -202,7 +224,13 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             profile="business_male_1",
         )
         pcm = bytes(3200)
-        synthesize = AsyncMock(side_effect=[(pcm, 0.1), (pcm, 0.1)])
+        synthesized_texts = []
+
+        async def synthesize_stream(_app, _request, text):
+            synthesized_texts.append(text)
+            yield pcm, 0.1
+            if len(synthesized_texts) == 1:
+                yield pcm, 0.1
 
         from server_total import app as app_module
 
@@ -212,7 +240,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         app_module.app.state.llm = FakeLLM()
         try:
             with (
-                patch("server_total.app.synthesize_speech", synthesize),
+                patch("server_total.app.stream_speech_chunks", synthesize_stream),
                 patch("server_total.app.websockets.connect", return_value=upstream),
             ):
                 await run_pipeline(frontend, request, "request-1")
@@ -223,17 +251,17 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 app_module.app.state.llm = previous_llm
 
         self.assertEqual(
-            [call.args[2] for call in synthesize.await_args_list],
-            ["人工智能能够快速处理数据，", "识别图像。"],
+            synthesized_texts,
+            ["人工智能能够快速处理数据，识别图像。"],
         )
         text_units = [
             item for item in frontend.json_messages if item["type"] == "text_unit"
         ]
         self.assertEqual(
             [(item["seq"], item["text"], item["delimiter"]) for item in text_units],
-            [(0, "人工智能能够快速处理数据，", "，"), (1, "识别图像。", "。")],
+            [(0, "人工智能能够快速处理数据，识别图像。", "。")],
         )
-        self.assertEqual([item["pts_us"] for item in text_units], [0, 100_000])
+        self.assertEqual([item["pts_us"] for item in text_units], [0])
         for text_unit in text_units:
             text_index = frontend.json_messages.index(text_unit)
             next_message = frontend.json_messages[text_index + 1]
@@ -246,11 +274,11 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ready["backend"], "torch")
         self.assertEqual(ready["inference_dtype"], "float32")
         first = PACKET_HEADER.unpack_from(frontend.binary_messages[0])
-        second = PACKET_HEADER.unpack_from(frontend.binary_messages[1])
+        first_cont = PACKET_HEADER.unpack_from(frontend.binary_messages[1])
         self.assertEqual((first[4], first[6]), (0, 0))
-        self.assertEqual((second[4], second[6]), (1, 120_000))
+        self.assertEqual((first_cont[4], first_cont[6]), (1, 90_000))
         self.assertEqual(frontend.json_messages[-1]["type"], "conversation_end")
-        self.assertEqual(frontend.json_messages[-1]["units"], 2)
+        self.assertEqual(frontend.json_messages[-1]["units"], 1)
         commits = [
             item for item in upstream.sent if isinstance(item, str) and "commit" in item
         ]
@@ -280,10 +308,13 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         )
         app_module.app.state.llm = FakeLLM()
         try:
+            async def synthesize_stream(_app, _request, _text):
+                yield bytes(3200), 0.1
+
             with (
                 patch(
-                    "server_total.app.synthesize_speech",
-                    AsyncMock(return_value=(bytes(3200), 0.1)),
+                    "server_total.app.stream_speech_chunks",
+                    synthesize_stream,
                 ),
                 patch("server_total.app.websockets.connect", return_value=upstream),
             ):

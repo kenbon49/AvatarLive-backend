@@ -26,6 +26,10 @@ services:
       - WHISPER_MODEL_DIR=/models/whisper
       - WHISPER_TOKENIZER_DIR=/models/whisper-tokenizer
       - WHISPER_DEVICE=${WHISPER_DEVICE:-cpu}
+      # All ModelScope assets must come from this project-local cache.
+      - MODELSCOPE_CACHE=/app/local_models/modelscope
+      - MODELSCOPE_OFFLINE=1
+      - WETEXT_MODEL_DIR=/app/local_models/modelscope/hub/pengzhendong/wetext
 
     deploy:
       resources:
@@ -35,7 +39,8 @@ services:
               count: 1
               capabilities: [gpu]
 
-    command: python server_v2.py --host 0.0.0.0 --port 8084
+    # Keep the native PyTorch LLM path; TensorRT accelerates Flow decoding.
+    command: python server_v2.py --host 0.0.0.0 --port 8084 --load-trt
     restart: "no"
 
     healthcheck:
@@ -43,7 +48,9 @@ services:
       interval: 20s
       timeout: 5s
       retries: 10
-      start_period: 120s
+      # A first-time TensorRT plan build can take many minutes. Failures are
+      # still detected immediately if the process exits during this window.
+      start_period: ${COSYVOICE_HEALTH_START_PERIOD:-45m}
 
     networks:
       - musetalk_network
@@ -71,7 +78,8 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - CUDA_VISIBLE_DEVICES=0
-      - MUSETALK_FPS=${MUSETALK_FPS:-18}
+      # One second of audio maps to exactly one 12-frame GPU batch.
+      - MUSETALK_FPS=${MUSETALK_FPS:-12}
       - MUSETALK_BATCH_SIZE=${MUSETALK_BATCH_SIZE:-12}
       - DEBUG=1  # 开发模式标志
 
@@ -124,8 +132,12 @@ services:
       - COSYVOICE_DEFAULT_VOICE=${COSYVOICE_DEFAULT_VOICE:-default_female}
       - MUSETALK_WS_URL=ws://musetalk-dev:8083/v1/stream
       - PIPELINE_REQUEST_TIMEOUT=${PIPELINE_REQUEST_TIMEOUT:-300}
-      - PIPELINE_FIRST_UNIT_MIN_CHARS=${PIPELINE_FIRST_UNIT_MIN_CHARS:-12}
-      - PIPELINE_TARGET_UNIT_CHARS=${PIPELINE_TARGET_UNIT_CHARS:-20}
+      - PIPELINE_FIRST_UNIT_MIN_CHARS=${PIPELINE_FIRST_UNIT_MIN_CHARS:-40}
+      - PIPELINE_TARGET_UNIT_CHARS=${PIPELINE_TARGET_UNIT_CHARS:-60}
+      - PIPELINE_COALESCE_HARD_DELIMITERS=${PIPELINE_COALESCE_HARD_DELIMITERS:-1}
+      - PIPELINE_AUDIO_QUEUE_SIZE=${PIPELINE_AUDIO_QUEUE_SIZE:-12}
+      - PIPELINE_TTS_CHUNK_SECONDS=${PIPELINE_TTS_CHUNK_SECONDS:-1.0}
+      - PIPELINE_PLAYBACK_BUFFER_SECONDS=${PIPELINE_PLAYBACK_BUFFER_SECONDS:-6.0}
 
     command: uvicorn server_total.app:app --host 0.0.0.0 --port 8080 --reload
     depends_on:

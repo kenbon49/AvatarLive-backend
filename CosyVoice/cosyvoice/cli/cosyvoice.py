@@ -16,7 +16,6 @@ import time
 from typing import Generator
 from tqdm import tqdm
 from hyperpyyaml import load_hyperpyyaml
-from modelscope import snapshot_download
 import torch
 from cosyvoice.cli.frontend import CosyVoiceFrontEnd
 from cosyvoice.cli.model import CosyVoiceModel, CosyVoice2Model, CosyVoice3Model
@@ -24,13 +23,22 @@ from cosyvoice.utils.file_utils import logging
 from cosyvoice.utils.class_utils import get_model_type
 
 
+def require_local_model_dir(model_dir: str) -> str:
+    """Reject model identifiers so model loading can never trigger a download."""
+    if not os.path.isdir(model_dir):
+        raise FileNotFoundError(
+            f"CosyVoice model directory does not exist locally: {model_dir}. "
+            "Download or copy the model into CosyVoice/pretrained_models first."
+        )
+    return model_dir
+
+
 class CosyVoice:
 
     def __init__(self, model_dir, load_jit=False, load_trt=False, fp16=False, trt_concurrent=1):
         self.model_dir = model_dir
         self.fp16 = fp16
-        if not os.path.exists(model_dir):
-            model_dir = snapshot_download(model_dir)
+        model_dir = require_local_model_dir(model_dir)
         hyper_yaml_path = '{}/cosyvoice.yaml'.format(model_dir)
         if not os.path.exists(hyper_yaml_path):
             raise ValueError('{} not found!'.format(hyper_yaml_path))
@@ -141,8 +149,7 @@ class CosyVoice2(CosyVoice):
     def __init__(self, model_dir, load_jit=False, load_trt=False, load_vllm=False, fp16=False, trt_concurrent=1):
         self.model_dir = model_dir
         self.fp16 = fp16
-        if not os.path.exists(model_dir):
-            model_dir = snapshot_download(model_dir)
+        model_dir = require_local_model_dir(model_dir)
         hyper_yaml_path = '{}/cosyvoice2.yaml'.format(model_dir)
         if not os.path.exists(hyper_yaml_path):
             raise ValueError('{} not found!'.format(hyper_yaml_path))
@@ -191,8 +198,7 @@ class CosyVoice3(CosyVoice2):
     def __init__(self, model_dir, load_trt=False, load_vllm=False, fp16=False, trt_concurrent=1):
         self.model_dir = model_dir
         self.fp16 = fp16
-        if not os.path.exists(model_dir):
-            model_dir = snapshot_download(model_dir)
+        model_dir = require_local_model_dir(model_dir)
         hyper_yaml_path = '{}/cosyvoice3.yaml'.format(model_dir)
         if not os.path.exists(hyper_yaml_path):
             raise ValueError('{} not found!'.format(hyper_yaml_path))
@@ -226,8 +232,7 @@ class CosyVoice3(CosyVoice2):
 
 
 def AutoModel(**kwargs):
-    if not os.path.exists(kwargs['model_dir']):
-        kwargs['model_dir'] = snapshot_download(kwargs['model_dir'])
+    kwargs['model_dir'] = require_local_model_dir(kwargs['model_dir'])
     if os.path.exists('{}/cosyvoice.yaml'.format(kwargs['model_dir'])):
         return CosyVoice(**kwargs)
     elif os.path.exists('{}/cosyvoice2.yaml'.format(kwargs['model_dir'])):

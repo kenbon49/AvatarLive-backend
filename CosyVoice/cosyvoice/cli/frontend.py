@@ -66,13 +66,24 @@ class CosyVoiceFrontEnd:
             try:
                 from wetext import Normalizer as ZhNormalizer
                 from wetext import Normalizer as EnNormalizer
-                self.zh_tn_model = ZhNormalizer(remove_erhua=False)
-                self.en_tn_model = EnNormalizer()
+                wetext_model_dir = os.getenv('WETEXT_MODEL_DIR')
+                if wetext_model_dir:
+                    self.zh_tn_model = ZhNormalizer(
+                        tagger_path=os.path.join(wetext_model_dir, 'zh', 'tn', 'tagger.fst'),
+                        verbalizer_path=os.path.join(wetext_model_dir, 'zh', 'tn', 'verbalizer.fst'),
+                        lang='zh')
+                    self.en_tn_model = EnNormalizer(
+                        tagger_path=os.path.join(wetext_model_dir, 'en', 'tn', 'tagger.fst'),
+                        verbalizer_path=os.path.join(wetext_model_dir, 'en', 'tn', 'verbalizer.fst'),
+                        lang='en')
+                else:
+                    self.zh_tn_model = ZhNormalizer(remove_erhua=False)
+                    self.en_tn_model = EnNormalizer()
                 self.text_frontend = 'wetext'
                 logging.info('use wetext frontend')
-            except:
+            except Exception as exc:
                 self.text_frontend = ''
-                logging.info('no frontend is avaliable')
+                logging.warning('no frontend is available: %s', exc)
 
 
     def _extract_text_token(self, text):

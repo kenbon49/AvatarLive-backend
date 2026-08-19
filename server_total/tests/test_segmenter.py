@@ -25,6 +25,18 @@ class SegmenterTests(unittest.TestCase):
             ],
         )
 
+    def test_can_coalesce_short_sentences_for_streaming_tts(self):
+        segmenter = PunctuationSegmenter(
+            first_unit_min_chars=8,
+            target_unit_chars=5,
+            coalesce_hard_delimiters=True,
+        )
+        units = segmenter.feed("你好。可以吗？当然可以！下一段继续。尾部")
+        self.assertEqual(
+            [unit.text for unit in units],
+            ["你好。可以吗？当然可以！", "下一段继续。"],
+        )
+
     def test_first_unit_can_split_earlier_than_later_units(self):
         segmenter = PunctuationSegmenter(first_unit_min_chars=12, target_unit_chars=20)
         units = segmenter.feed(
