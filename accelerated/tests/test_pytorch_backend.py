@@ -25,6 +25,11 @@ class PyTorchBackendTests(unittest.TestCase):
         self.assertEqual(MuseTalkEngine.inference_dtype, "float32")
         self.assertNotIn("use_float16", inspect.signature(MuseTalkEngine).parameters)
 
+    def test_tf32_is_enabled_without_changing_weight_dtype(self):
+        source = inspect.getsource(MuseTalkEngine._load_models)
+        self.assertIn("self.allow_tf32", source)
+        self.assertIn("torch.float32", source)
+
     def test_low_level_musetalk_models_reject_float16(self):
         root = Path(__file__).resolve().parents[2]
         for relative, message in (

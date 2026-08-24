@@ -1,6 +1,6 @@
 # AvatarLive-backend
 
-AvatarLive 的数字人后端，基于 MuseTalk，并集成实时推理、CosyVoice 音色克隆、LLM 编排及 Gradio 展示界面。
+AvatarLive 的数字人后端，基于 MuseTalk，并集成实时推理、OpenVoice 音色克隆、LLM 编排及 Gradio 展示界面。
 
 # MuseTalk
 
@@ -220,7 +220,24 @@ You can download weights in two ways:
 | ResNet-18 | [resnet18-5c106cde.pth](https://download.pytorch.org/models/resnet18-5c106cde.pth) | `models/face-parse-bisent/resnet18-5c106cde.pth` |
 | Robust Video Matting (可选抠图) | [PeterL1n/RobustVideoMatting](https://github.com/PeterL1n/RobustVideoMatting#download) | `models/rmbg_weight/rvm_resnet50.pth` |
 
-CosyVoice 服务默认加载 `CosyVoice/pretrained_models/CosyVoice2-0.5B`。预置与克隆音色保存在 `CosyVoice/voice_library`，本地 Whisper 权重和 tokenizer 分别从 `models/whisper` 与 `.tmp-whisper-tokenizer` 挂载。
+OpenVoice 服务默认加载 `OpenVoice/checkpoints_v2` 中的本地 V2 模型，并以 `data/input/audio/yongen.wav` 作为默认克隆参考音频。用户音色及预提取的 embedding 保存在 `OpenVoice/voice_library`，运行时不会联网下载模型。
+
+#### 不使用 Docker 的本地联调
+
+Windows 下可直接运行本地启动脚本，省去反复构建开发镜像的时间：
+
+```powershell
+.\scripts\start_local_test.bat
+```
+
+脚本会并行启动 OpenVoice（`openvoice` Conda 环境，端口 `8084`）和 MuseTalk（`musetalk` Conda 环境，端口 `8083`）；两者健康检查通过后，再使用 `musetalk` 环境启动总服务（端口 `8080`）。它会自动读取项目根目录 `.env`（若存在）及 `llm_inference/.env`，日志写入 `.local-test/logs`。按 `Ctrl+C` 可停止本次脚本启动的全部服务。
+
+也可以单独启动服务或覆盖环境名、端口：
+
+```powershell
+.\scripts\start_local_test.bat -Service OpenVoice
+.\scripts\start_local_test.bat -OpenVoiceEnv openvoice -MuseTalkEnv musetalk -ServerTotalPort 8080
+```
 
 #### Option 1: Using Download Scripts
 We provide two scripts for automatic downloading:

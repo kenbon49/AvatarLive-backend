@@ -1,0 +1,58 @@
+v1:
+  styles:
+    - default
+    - whispering
+    - shouting
+    - excited
+    - cheerful
+    - terrified
+    - angry
+    - sad
+    - friendly
+  converter:
+    config: checkpoints/converter/config.json
+    checkpoint: checkpoints/converter/checkpoint.pth
+  languages:
+    zh:
+      name: Chinese
+      config: checkpoints/base_speakers/ZH/config.json
+      checkpoint: checkpoints/base_speakers/ZH/checkpoint.pth
+      default_embedding: checkpoints/base_speakers/ZH/zh_default_se.pth
+    en:
+      name: English
+      config: checkpoints/base_speakers/EN/config.json
+      checkpoint: checkpoints/base_speakers/EN/checkpoint.pth
+      default_embedding: checkpoints/base_speakers/EN/en_default_se.pth
+      style_embedding: checkpoints/base_speakers/EN/en_style_se.pth
+
+v2:
+  converter:
+    config: checkpoints_v2/converter/config.json
+    checkpoint: checkpoints_v2/converter/checkpoint.pth
+  languages:
+    zh:
+      melo_language: ZH
+      default_speaker: zh
+      speakers:
+        zh:
+          melo_speaker: ZH
+          embedding: checkpoints_v2/base_speakers/ses/zh.pth
+    en:
+      melo_language: EN
+      default_speaker: en-default
+      speakers:
+        en-default:
+          melo_speaker: EN-Default
+          embedding: checkpoints_v2/base_speakers/ses/en-default.pth
+        en-us:
+          melo_speaker: EN-US
+          embedding: checkpoints_v2/base_speakers/ses/en-us.pth
+        en-br:
+          melo_speaker: EN-BR
+          embedding: checkpoints_v2/base_speakers/ses/en-br.pth
+        en-india:
+          melo_speaker: EN_INDIA
+          embedding: checkpoints_v2/base_speakers/ses/en-india.pth
+        en-au:
+          melo_speaker: EN-AU
+          embedding: checkpoints_v2/base_speakers/ses/en-au.pth

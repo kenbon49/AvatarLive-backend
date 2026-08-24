@@ -35,8 +35,9 @@ cache/
 MeloTTS2/bert_model/
 MeloTTS2/pretrained_model/
 MeloTTS2/onnx_models/
-CosyVoice/pretrained_models/
-
+OpenVoice/checkpoints/
+OpenVoice/checkpoints_v2/
+OpenVoice/processed/
+OpenVoice/voice_library/
+.local-test/
 *.pyc
-CosyVoice/cosyvoice/__pycache__/
-CosyVoice/cosyvoice/*/_pycache/

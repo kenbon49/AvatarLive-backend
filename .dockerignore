@@ -41,6 +41,8 @@ MeloTTS2/bert_model/
 MeloTTS2/pretrained_model/
 data/output/
 *.pth
+!OpenVoice/checkpoints/**/*.pth
+!OpenVoice/checkpoints_v2/**/*.pth
 *.ckpt
 *.safetensors
 

@@ -35,26 +35,25 @@ services:
               device_ids: ["0"]
               capabilities: [gpu]
 
-  cosyvoice:
+  openvoice:
     build:
-      context: ./CosyVoice
-      dockerfile: Dockerfile
-    image: avatarlive-backend-cosyvoice:local
+      context: .
+      dockerfile: OpenVoice/Dockerfile
+    image: avatarlive-backend-openvoice:local
     ports:
       - "8084:8084"
     volumes:
-      - ./CosyVoice/pretrained_models:/app/pretrained_models:ro
-      - ./CosyVoice/voice_library:/app/voice_library
-      - ./models/whisper:/models/whisper:ro
-      - ./.tmp-whisper-tokenizer:/models/whisper-tokenizer:ro
+      - ./OpenVoice:/app/OpenVoice
+      - ./data/input/audio:/app/data/input/audio:ro
     environment:
       PYTHONUNBUFFERED: "1"
+      HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
       CUDA_VISIBLE_DEVICES: "0"
-      WHISPER_MODEL_DIR: /models/whisper
-      WHISPER_TOKENIZER_DIR: /models/whisper-tokenizer
-      WHISPER_DEVICE: cpu
-    command: python server_v2.py --host 0.0.0.0 --port 8084
+      OPENVOICE_DEVICE: cuda:0
+      OPENVOICE_DEFAULT_VOICE: default
+      OPENVOICE_DEFAULT_REFERENCE: /app/data/input/audio/yongen.wav
+    command: python server.py --host 0.0.0.0 --port 8084
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8084/health | grep -q '\"status\":\"ok\"'"]
@@ -84,15 +83,16 @@ services:
       # The frontend value is a UI model id; server_total calls LiteLLM directly.
       LITELLM_MODEL: ${SERVER_TOTAL_LITELLM_MODEL:-azure-gpt-5.4}
       LITELLM_TEMPERATURE: ${SERVER_TOTAL_LITELLM_TEMPERATURE:-1}
-      COSYVOICE_URL: http://cosyvoice:8084
-      COSYVOICE_DEFAULT_VOICE: default_female
+      OPENVOICE_URL: http://openvoice:8084
+      OPENVOICE_DEFAULT_VOICE: default
       MUSETALK_WS_URL: ws://musetalk:8083/v1/stream
       PIPELINE_REQUEST_TIMEOUT: "300"
-      PIPELINE_FIRST_UNIT_MIN_CHARS: "12"
-      PIPELINE_TARGET_UNIT_CHARS: "20"
+      PIPELINE_FIRST_UNIT_MIN_CHARS: "1"
+      PIPELINE_TARGET_UNIT_CHARS: "1"
+      PIPELINE_COALESCE_HARD_DELIMITERS: "0"
     depends_on:
       musetalk:
         condition: service_healthy
-      cosyvoice:
+      openvoice:
         condition: service_healthy
     restart: unless-stopped

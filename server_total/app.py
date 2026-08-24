@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import logging
 import math
@@ -36,8 +36,8 @@ from .segmenter import PunctuationSegmenter, TextUnit
 
 
 log = logging.getLogger("server-total")
-COSYVOICE_URL = os.getenv("COSYVOICE_URL", "http://localhost:8084").rstrip("/")
-DEFAULT_VOICE_ID = os.getenv("COSYVOICE_DEFAULT_VOICE", "default_female")
+OPENVOICE_URL = os.getenv("OPENVOICE_URL", "http://localhost:8084").rstrip("/")
+DEFAULT_VOICE_ID = os.getenv("OPENVOICE_DEFAULT_VOICE", "default")
 MUSETALK_WS_URL = os.getenv("MUSETALK_WS_URL", "ws://localhost:8083/v1/stream")
 MUSETALK_BACKEND = "torch"
 MUSETALK_INFERENCE_DTYPE = "float32"
@@ -45,12 +45,18 @@ REQUEST_TIMEOUT = float(os.getenv("PIPELINE_REQUEST_TIMEOUT", "300"))
 PCM_CHUNK_BYTES = 64 * 1024
 SENTENCE_QUEUE_SIZE = int(os.getenv("PIPELINE_TEXT_QUEUE_SIZE", "4"))
 AUDIO_QUEUE_SIZE = int(os.getenv("PIPELINE_AUDIO_QUEUE_SIZE", "12"))
-TTS_STREAM_CHUNK_SECONDS = float(os.getenv("PIPELINE_TTS_CHUNK_SECONDS", "1.0"))
-PLAYBACK_BUFFER_SECONDS = float(os.getenv("PIPELINE_PLAYBACK_BUFFER_SECONDS", "6.0"))
-FIRST_UNIT_MIN_CHARS = int(os.getenv("PIPELINE_FIRST_UNIT_MIN_CHARS", "40"))
-TARGET_UNIT_CHARS = int(os.getenv("PIPELINE_TARGET_UNIT_CHARS", "60"))
+TTS_STREAM_CHUNK_SECONDS = float(os.getenv("PIPELINE_TTS_CHUNK_SECONDS", "0.5"))
+TTS_STREAM_STEADY_CHUNK_SECONDS = float(
+    os.getenv("PIPELINE_TTS_STEADY_CHUNK_SECONDS", "1.0")
+)
+TTS_STREAM_MIN_TAIL_SECONDS = float(
+    os.getenv("PIPELINE_TTS_MIN_TAIL_SECONDS", "0.25")
+)
+PLAYBACK_BUFFER_SECONDS = float(os.getenv("PIPELINE_PLAYBACK_BUFFER_SECONDS", "1.5"))
+FIRST_UNIT_MIN_CHARS = int(os.getenv("PIPELINE_FIRST_UNIT_MIN_CHARS", "1"))
+TARGET_UNIT_CHARS = int(os.getenv("PIPELINE_TARGET_UNIT_CHARS", "1"))
 COALESCE_HARD_DELIMITERS = os.getenv(
-    "PIPELINE_COALESCE_HARD_DELIMITERS", "1"
+    "PIPELINE_COALESCE_HARD_DELIMITERS", "0"
 ).lower() not in {"0", "false", "no"}
 _END = object()
 AvatarProfile = Literal[
@@ -99,6 +105,7 @@ class AudioUnit:
     pcm: bytes
     duration: float
     chunk_index: int
+    produced_at: float = field(default_factory=time.perf_counter)
 
 
 @dataclass(frozen=True)
@@ -168,7 +175,8 @@ async def health() -> dict[str, object]:
             "api_key_configured": bool(llm.api_key),
             "streaming": True,
         },
-        "cosyvoice_url": COSYVOICE_URL,
+        "tts_service": "openvoice",
+        "openvoice_url": OPENVOICE_URL,
         "default_voice_id": DEFAULT_VOICE_ID,
         "musetalk_ws_url": MUSETALK_WS_URL,
         "musetalk_backend": MUSETALK_BACKEND,
@@ -190,12 +198,12 @@ async def avatars() -> dict[str, object]:
 @app.get("/v1/voices")
 async def voices() -> dict[str, object]:
     try:
-        response = await app.state.http.get(f"{COSYVOICE_URL}/v1/speakers")
+        response = await app.state.http.get(f"{OPENVOICE_URL}/v1/speakers")
         response.raise_for_status()
         return response.json()
     except httpx.HTTPError as exc:
         raise HTTPException(
-            status_code=502, detail=f"CosyVoice is unavailable: {exc}"
+            status_code=502, detail=f"OpenVoice is unavailable: {exc}"
         ) from exc
 
 
@@ -211,7 +219,7 @@ async def create_cloned_voice(
     if len(content) > 50 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="audio exceeds the 50 MB limit")
     response = await app.state.http.post(
-        f"{COSYVOICE_URL}/v1/voices/clone",
+        f"{OPENVOICE_URL}/v1/voices/clone",
         data={"name": name},
         files={
             "audio": (
@@ -231,15 +239,20 @@ async def create_cloned_voice(
 
 
 async def stream_speech_chunks(
-    app_: FastAPI, request: AskRequest | SpeakRequest, text: str
+    app_: FastAPI,
+    request: AskRequest | SpeakRequest,
+    text: str,
+    *,
+    first_chunk_seconds: float | None = None,
 ) -> AsyncIterator[tuple[bytes, float]]:
     voice_id = request.voice_id or request.speaker or DEFAULT_VOICE_ID
     async with app_.state.http.stream(
         "POST",
-        f"{COSYVOICE_URL}/v1/voice-clone",
+        f"{OPENVOICE_URL}/v1/voice-clone",
         data={
             "tts_text": text,
             "speaker_id": voice_id,
+            "language": request.language.lower(),
             "stream": str(request.speed == 1.0).lower(),
             "speed": request.speed,
             "output_sample_rate": 16000,
@@ -249,15 +262,35 @@ async def stream_speech_chunks(
             await response.aread()
         response.raise_for_status()
         if response.headers.get("X-Audio-Sample-Format") != "s16le":
-            raise RuntimeError("CosyVoice returned an unsupported audio format")
+            raise RuntimeError("OpenVoice returned an unsupported audio format")
         source_rate = int(response.headers.get("X-Audio-Sample-Rate", "0"))
         if source_rate <= 0:
-            raise RuntimeError("CosyVoice did not report its sample rate")
-        chunk_bytes = max(2, round(source_rate * 2 * TTS_STREAM_CHUNK_SECONDS))
-        chunk_bytes -= chunk_bytes % 2
-        async for pcm in response.aiter_bytes(chunk_size=chunk_bytes):
-            if not pcm or len(pcm) % 2:
-                raise RuntimeError("CosyVoice returned invalid PCM audio")
+            raise RuntimeError("OpenVoice did not report its sample rate")
+        first_chunk_bytes = max(
+            2,
+            round(
+                source_rate
+                * 2
+                * (
+                    TTS_STREAM_CHUNK_SECONDS
+                    if first_chunk_seconds is None
+                    else first_chunk_seconds
+                )
+            ),
+        )
+        steady_chunk_bytes = max(
+            2, round(source_rate * 2 * TTS_STREAM_STEADY_CHUNK_SECONDS)
+        )
+        first_chunk_bytes -= first_chunk_bytes % 2
+        steady_chunk_bytes -= steady_chunk_bytes % 2
+        min_tail_bytes = max(2, round(source_rate * 2 * TTS_STREAM_MIN_TAIL_SECONDS))
+        min_tail_bytes -= min_tail_bytes % 2
+        pending = bytearray()
+        target_bytes = first_chunk_bytes
+        emitted_first = False
+
+        def emit_chunk(source_pcm: bytes) -> tuple[bytes, float]:
+            pcm = source_pcm
             if source_rate != 16000:
                 divisor = math.gcd(source_rate, 16000)
                 samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32)
@@ -271,7 +304,24 @@ async def stream_speech_chunks(
                     .astype("<i2")
                     .tobytes()
                 )
-            yield pcm, len(pcm) / 32000.0
+            return pcm, len(pcm) / 32000.0
+
+        async for incoming in response.aiter_bytes():
+            if incoming:
+                pending.extend(incoming)
+            reserve_bytes = 0 if not emitted_first else min_tail_bytes
+            while len(pending) >= target_bytes + reserve_bytes:
+                source_pcm = bytes(pending[:target_bytes])
+                del pending[:target_bytes]
+                yield emit_chunk(source_pcm)
+                emitted_first = True
+                target_bytes = steady_chunk_bytes
+                reserve_bytes = min_tail_bytes
+
+        if len(pending) % 2:
+            raise RuntimeError("OpenVoice returned invalid PCM audio")
+        if pending:
+            yield emit_chunk(bytes(pending))
 
 
 async def synthesize_speech(
@@ -283,7 +333,7 @@ async def synthesize_speech(
         chunks.append(pcm)
         duration += chunk_duration
     if not chunks:
-        raise RuntimeError("CosyVoice returned empty PCM audio")
+        raise RuntimeError("OpenVoice returned empty PCM audio")
     return b"".join(chunks), duration
 
 
@@ -311,11 +361,11 @@ async def _produce_text_units(
 
     if kind == "speak":
         await sender.send_json({"type": "speak_start", "request_id": request_id})
-        for unit in segmenter.feed(request.text):
+        answer = request.text.strip()
+        for unit in segmenter.feed(answer):
             await queue.put(unit)
         for unit in segmenter.finish():
             await queue.put(unit)
-        answer = request.text.strip()
         await sender.send_json(
             {"type": "speak_result", "request_id": request_id, "text": answer}
         )
@@ -369,7 +419,14 @@ async def _synthesize_units(
         duration = 0.0
         chunks = 0
         async for pcm, chunk_duration in stream_speech_chunks(
-            app, request, item.text
+            app,
+            request,
+            item.text,
+            first_chunk_seconds=(
+                TTS_STREAM_CHUNK_SECONDS
+                if count == 0
+                else TTS_STREAM_STEADY_CHUNK_SECONDS
+            ),
         ):
             await audio_queue.put(
                 AudioUnit(item, pcm, chunk_duration, chunk_index=chunks)
@@ -377,7 +434,7 @@ async def _synthesize_units(
             duration += chunk_duration
             chunks += 1
         if chunks == 0:
-            raise RuntimeError("CosyVoice returned empty PCM audio")
+            raise RuntimeError("OpenVoice returned empty PCM audio")
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         await sender.send_json(
             {
@@ -484,6 +541,8 @@ async def _render_units(
             if not isinstance(item, AudioUnit):
                 raise TypeError("audio queue received an invalid item")
             unit = item.unit
+            render_started_at = time.perf_counter()
+            queue_wait_ms = round((render_started_at - item.produced_at) * 1000)
             if item.chunk_index == 0:
                 if active_unit is not None:
                     raise RuntimeError("new audio segment started before the previous end")
@@ -512,14 +571,19 @@ async def _render_units(
             for offset in range(0, len(item.pcm), PCM_CHUNK_BYTES):
                 await upstream.send(item.pcm[offset : offset + PCM_CHUNK_BYTES])
             await upstream.send(json.dumps({"type": "commit"}))
+            committed_at = time.perf_counter()
 
             packet_count = 0
             text_unit_sent = item.chunk_index > 0
+            stream_started_at: float | None = None
+            first_media_at: float | None = None
             while True:
                 message = await asyncio.wait_for(
                     upstream.recv(), timeout=REQUEST_TIMEOUT
                 )
                 if isinstance(message, bytes):
+                    if first_media_at is None:
+                        first_media_at = time.perf_counter()
                     if not text_unit_sent:
                         await sender.send_json(
                             {
@@ -556,6 +620,8 @@ async def _render_units(
                         }
                     )
                     text_unit_sent = True
+                if control.get("type") == "stream_start":
+                    stream_started_at = time.perf_counter()
                 control.update(
                     {
                         "request_id": request_id,
@@ -567,6 +633,42 @@ async def _render_units(
                 if control.get("type") == "stream_end":
                     break
 
+            render_finished_at = time.perf_counter()
+            processing_seconds = render_finished_at - render_started_at
+            realtime_factor = processing_seconds / max(item.duration, 1e-6)
+            metrics = {
+                "type": "chunk_metrics",
+                "request_id": request_id,
+                "segment_seq": unit.seq,
+                "chunk_index": item.chunk_index,
+                "audio_duration_seconds": round(item.duration, 3),
+                "queue_wait_ms": queue_wait_ms,
+                "commit_to_stream_start_ms": (
+                    round((stream_started_at - committed_at) * 1000)
+                    if stream_started_at is not None
+                    else None
+                ),
+                "first_media_ms": (
+                    round((first_media_at - render_started_at) * 1000)
+                    if first_media_at is not None
+                    else None
+                ),
+                "processing_ms": round(processing_seconds * 1000),
+                "realtime_factor": round(realtime_factor, 3),
+                "packets": packet_count,
+            }
+            await sender.send_json(metrics)
+            log.info(
+                "MuseTalk chunk request=%s segment=%d chunk=%d duration=%.3fs "
+                "processing=%.3fs rtf=%.3f queue_wait=%dms",
+                request_id,
+                unit.seq,
+                item.chunk_index,
+                item.duration,
+                processing_seconds,
+                realtime_factor,
+                queue_wait_ms,
+            )
             active_packet_count += packet_count
             rendered_frames = math.floor(len(item.pcm) / 2 / 16000 * fps)
             timeline.pts_offset_us += round(rendered_frames / fps * 1_000_000)
@@ -677,7 +779,7 @@ async def _run_and_report(
         )
     except httpx.HTTPStatusError as exc:
         detail = exc.response.text[:500]
-        log.exception("CosyVoice request failed")
+        log.exception("OpenVoice request failed")
         await sender.send_json(
             {
                 "type": "error",

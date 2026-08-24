@@ -1,7 +1,0 @@
-{
-  "default_female": {
-    "name": "Default female reference",
-    "prompt_wav": "asset/zero_shot_prompt.wav",
-    "prompt_text": "希望你以后能够做的比我还好呦。"
-  }
-}

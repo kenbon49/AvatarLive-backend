@@ -15,6 +15,7 @@ from server_total.app import (
     avatars,
     conversation,
     run_pipeline,
+    stream_speech_chunks,
     synthesize_speech,
 )
 from server_total.protocol import PACKET_HEADER, remap_media_packet
@@ -121,6 +122,28 @@ def media_packet(
 
 
 class PipelineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_speak_splits_text_at_punctuation(self):
+        from server_total.app import _produce_text_units
+
+        frontend = FakeFrontend()
+        queue = asyncio.Queue()
+        request = SimpleNamespace(text="First sentence. Second sentence. Third sentence.")
+
+        answer = await _produce_text_units(
+            frontend, request, "request-speak", queue, kind="speak"
+        )
+        first = await queue.get()
+        second = await queue.get()
+        third = await queue.get()
+        end = await queue.get()
+
+        self.assertEqual(answer, request.text)
+        self.assertEqual(
+            [(first.seq, first.text), (second.seq, second.text), (third.seq, third.text)],
+            [(0, "First sentence."), (1, "Second sentence."), (2, "Third sentence.")],
+        )
+        self.assertIsNotNone(end)
+
     async def test_exposes_and_validates_all_public_avatars(self):
         response = await avatars()
         profile_ids = [item["id"] for item in response["avatars"]]
@@ -166,12 +189,46 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         pcm, duration = await synthesize_speech(fake_app, request, "简短回答")
         self.assertEqual(pcm, FakeHttpResponse.content)
         self.assertEqual(duration, 0.125)
-        self.assertEqual(http.request[1]["data"]["speaker_id"], "default_female")
+        self.assertEqual(http.request[1]["data"]["speaker_id"], "default")
+        self.assertEqual(http.request[1]["data"]["language"], "zh")
         self.assertEqual(http.request[1]["data"]["tts_text"], "简短回答")
         self.assertEqual(http.request[1]["data"]["stream"], "true")
         self.assertEqual(http.request[1]["data"]["output_sample_rate"], 16000)
 
-    async def test_synthesize_resamples_cosyvoice_pcm_and_forwards_voice_id(self):
+    async def test_streaming_uses_a_short_first_chunk_then_larger_chunks(self):
+        class ChunkedResponse(FakeHttpResponse):
+            content = bytes(56_000)
+
+            async def aiter_bytes(self, chunk_size=None):
+                del chunk_size
+                for offset in range(0, len(self.content), 3_000):
+                    yield self.content[offset : offset + 3_000]
+
+        class ChunkedClient(FakeHttpClient):
+            def stream(self, _method, url, **kwargs):
+                self.request = (url, kwargs)
+                return FakeStreamContext(ChunkedResponse())
+
+        http = ChunkedClient()
+        fake_app = SimpleNamespace(state=SimpleNamespace(http=http))
+        request = AskRequest(type="ask", question="chunking")
+
+        with (
+            patch("server_total.app.TTS_STREAM_CHUNK_SECONDS", 0.5),
+            patch("server_total.app.TTS_STREAM_STEADY_CHUNK_SECONDS", 1.0),
+        ):
+            chunks = [
+                item async for item in stream_speech_chunks(fake_app, request, "text")
+            ]
+
+        self.assertEqual(
+            [len(pcm) for pcm, _duration in chunks], [16_000, 32_000, 8_000]
+        )
+        self.assertEqual(
+            [duration for _pcm, duration in chunks], [0.5, 1.0, 0.25]
+        )
+
+    async def test_synthesize_resamples_openvoice_pcm_and_forwards_voice_id(self):
         class NativeRateResponse(FakeHttpResponse):
             content = bytes(4800)
             headers = {
@@ -214,6 +271,11 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 '{"type":"stream_start"}',
                 media_packet(6, 10_000, b"first-cont"),
                 '{"type":"stream_end","packets":1}',
+                '{"type":"started","profile":"business_male_1"}',
+                '{"type":"queued","profile":"business_male_1"}',
+                '{"type":"stream_start"}',
+                media_packet(8, 0, b"second"),
+                '{"type":"stream_end","packets":1}',
             ]
         )
         frontend = FakeFrontend()
@@ -226,7 +288,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         pcm = bytes(3200)
         synthesized_texts = []
 
-        async def synthesize_stream(_app, _request, text):
+        async def synthesize_stream(_app, _request, text, **_kwargs):
             synthesized_texts.append(text)
             yield pcm, 0.1
             if len(synthesized_texts) == 1:
@@ -252,22 +314,25 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             synthesized_texts,
-            ["人工智能能够快速处理数据，识别图像。"],
+            ["人工智能能够快速处理数据，", "识别图像。"],
         )
         text_units = [
             item for item in frontend.json_messages if item["type"] == "text_unit"
         ]
         self.assertEqual(
             [(item["seq"], item["text"], item["delimiter"]) for item in text_units],
-            [(0, "人工智能能够快速处理数据，识别图像。", "。")],
+            [
+                (0, "人工智能能够快速处理数据，", "，"),
+                (1, "识别图像。", "。"),
+            ],
         )
-        self.assertEqual([item["pts_us"] for item in text_units], [0])
+        self.assertEqual([item["pts_us"] for item in text_units], [0, 160_000])
         for text_unit in text_units:
             text_index = frontend.json_messages.index(text_unit)
             next_message = frontend.json_messages[text_index + 1]
             self.assertEqual(next_message["type"], "stream_start")
             self.assertEqual(next_message["segment_seq"], text_unit["seq"])
-        self.assertEqual(len(frontend.binary_messages), 2)
+        self.assertEqual(len(frontend.binary_messages), 3)
         ready = next(
             item for item in frontend.json_messages if item["type"] == "musetalk_ready"
         )
@@ -275,18 +340,20 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ready["inference_dtype"], "float32")
         first = PACKET_HEADER.unpack_from(frontend.binary_messages[0])
         first_cont = PACKET_HEADER.unpack_from(frontend.binary_messages[1])
+        second = PACKET_HEADER.unpack_from(frontend.binary_messages[2])
         self.assertEqual((first[4], first[6]), (0, 0))
         self.assertEqual((first_cont[4], first_cont[6]), (1, 90_000))
+        self.assertEqual((second[4], second[6]), (2, 160_000))
         self.assertEqual(frontend.json_messages[-1]["type"], "conversation_end")
-        self.assertEqual(frontend.json_messages[-1]["units"], 1)
+        self.assertEqual(frontend.json_messages[-1]["units"], 2)
         commits = [
             item for item in upstream.sent if isinstance(item, str) and "commit" in item
         ]
-        self.assertEqual(len(commits), 2)
+        self.assertEqual(len(commits), 3)
         starts = [
             item for item in upstream.sent if isinstance(item, str) and "start" in item
         ]
-        self.assertEqual(len(starts), 2)
+        self.assertEqual(len(starts), 3)
         self.assertTrue(all('"profile": "business_male_1"' in item for item in starts))
 
     async def test_pipeline_does_not_deadlock_when_musetalk_fails(self):
@@ -308,7 +375,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         )
         app_module.app.state.llm = FakeLLM()
         try:
-            async def synthesize_stream(_app, _request, _text):
+            async def synthesize_stream(_app, _request, _text, **_kwargs):
                 yield bytes(3200), 0.1
 
             with (

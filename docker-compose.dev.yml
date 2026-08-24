@@ -1,35 +1,29 @@
 # 开发环境配置 - 支持代码热更新
 services:
-  # CosyVoice 提供预置音色、Whisper 转写和零样本音色克隆。
-  cosyvoice-dev:
+  # OpenVoice 常驻模型并提供零样本音色克隆。
+  openvoice-dev:
     build:
-      context: ./CosyVoice
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: OpenVoice/Dockerfile
 
-    container_name: cosyvoice_dev
-    image: cosyvoice:dev
-    # This is a project-local image built from the pre-pulled PyTorch base.
-    pull_policy: build
+    container_name: openvoice_dev
+    image: openvoice:dev
 
     ports:
       - "8084:8084"
 
     volumes:
-      - ./CosyVoice:/app
-      - ./models/whisper:/models/whisper:ro
-      - ./.tmp-whisper-tokenizer:/models/whisper-tokenizer:ro
+      - ./OpenVoice:/app/OpenVoice
+      - ./data/input/audio:/app/data/input/audio:ro
 
     environment:
       - PYTHONUNBUFFERED=1
+      - HF_HUB_OFFLINE=1
       - TRANSFORMERS_OFFLINE=1
       - CUDA_VISIBLE_DEVICES=0
-      - WHISPER_MODEL_DIR=/models/whisper
-      - WHISPER_TOKENIZER_DIR=/models/whisper-tokenizer
-      - WHISPER_DEVICE=${WHISPER_DEVICE:-cpu}
-      # All ModelScope assets must come from this project-local cache.
-      - MODELSCOPE_CACHE=/app/local_models/modelscope
-      - MODELSCOPE_OFFLINE=1
-      - WETEXT_MODEL_DIR=/app/local_models/modelscope/hub/pengzhendong/wetext
+      - OPENVOICE_DEVICE=${OPENVOICE_DEVICE:-cuda:0}
+      - OPENVOICE_DEFAULT_VOICE=${OPENVOICE_DEFAULT_VOICE:-default}
+      - OPENVOICE_DEFAULT_REFERENCE=/app/data/input/audio/yongen.wav
 
     deploy:
       resources:
@@ -39,8 +33,7 @@ services:
               count: 1
               capabilities: [gpu]
 
-    # Keep the native PyTorch LLM path; TensorRT accelerates Flow decoding.
-    command: python server_v2.py --host 0.0.0.0 --port 8084 --load-trt
+    command: python server.py --host 0.0.0.0 --port 8084
     restart: "no"
 
     healthcheck:
@@ -48,14 +41,12 @@ services:
       interval: 20s
       timeout: 5s
       retries: 10
-      # A first-time TensorRT plan build can take many minutes. Failures are
-      # still detected immediately if the process exits during this window.
-      start_period: ${COSYVOICE_HEALTH_START_PERIOD:-45m}
+      start_period: ${OPENVOICE_HEALTH_START_PERIOD:-10m}
 
     networks:
       - musetalk_network
 
-  # 轻量网关负责 LLM -> CosyVoice -> MuseTalk，不加载推理模型。
+  # 轻量网关负责 LLM -> OpenVoice -> MuseTalk，不加载推理模型。
   musetalk-dev:
     build:
       context: .
@@ -79,8 +70,9 @@ services:
       - PYTHONUNBUFFERED=1
       - CUDA_VISIBLE_DEVICES=0
       # One second of audio maps to exactly one 12-frame GPU batch.
-      - MUSETALK_FPS=${MUSETALK_FPS:-12}
-      - MUSETALK_BATCH_SIZE=${MUSETALK_BATCH_SIZE:-12}
+      - MUSETALK_FPS=${MUSETALK_FPS:-10}
+      - MUSETALK_BATCH_SIZE=${MUSETALK_BATCH_SIZE:-10}
+      - MUSETALK_ALLOW_TF32=${MUSETALK_ALLOW_TF32:-1}
       - DEBUG=1  # 开发模式标志
 
     # 开发模式使用命令行启动，方便调试
@@ -128,22 +120,24 @@ services:
 
     environment:
       - PYTHONUNBUFFERED=1
-      - COSYVOICE_URL=http://cosyvoice-dev:8084
-      - COSYVOICE_DEFAULT_VOICE=${COSYVOICE_DEFAULT_VOICE:-default_female}
+      - OPENVOICE_URL=http://openvoice-dev:8084
+      - OPENVOICE_DEFAULT_VOICE=${OPENVOICE_DEFAULT_VOICE:-default}
       - MUSETALK_WS_URL=ws://musetalk-dev:8083/v1/stream
       - PIPELINE_REQUEST_TIMEOUT=${PIPELINE_REQUEST_TIMEOUT:-300}
-      - PIPELINE_FIRST_UNIT_MIN_CHARS=${PIPELINE_FIRST_UNIT_MIN_CHARS:-40}
-      - PIPELINE_TARGET_UNIT_CHARS=${PIPELINE_TARGET_UNIT_CHARS:-60}
-      - PIPELINE_COALESCE_HARD_DELIMITERS=${PIPELINE_COALESCE_HARD_DELIMITERS:-1}
+      - PIPELINE_FIRST_UNIT_MIN_CHARS=${PIPELINE_FIRST_UNIT_MIN_CHARS:-1}
+      - PIPELINE_TARGET_UNIT_CHARS=${PIPELINE_TARGET_UNIT_CHARS:-1}
+      - PIPELINE_COALESCE_HARD_DELIMITERS=${PIPELINE_COALESCE_HARD_DELIMITERS:-0}
       - PIPELINE_AUDIO_QUEUE_SIZE=${PIPELINE_AUDIO_QUEUE_SIZE:-12}
-      - PIPELINE_TTS_CHUNK_SECONDS=${PIPELINE_TTS_CHUNK_SECONDS:-1.0}
-      - PIPELINE_PLAYBACK_BUFFER_SECONDS=${PIPELINE_PLAYBACK_BUFFER_SECONDS:-6.0}
+      - PIPELINE_TTS_CHUNK_SECONDS=${PIPELINE_TTS_CHUNK_SECONDS:-0.5}
+      - PIPELINE_TTS_STEADY_CHUNK_SECONDS=${PIPELINE_TTS_STEADY_CHUNK_SECONDS:-1.0}
+      - PIPELINE_TTS_MIN_TAIL_SECONDS=${PIPELINE_TTS_MIN_TAIL_SECONDS:-0.25}
+      - PIPELINE_PLAYBACK_BUFFER_SECONDS=${PIPELINE_PLAYBACK_BUFFER_SECONDS:-1.5}
 
     command: uvicorn server_total.app:app --host 0.0.0.0 --port 8080 --reload
     depends_on:
       musetalk-dev:
         condition: service_healthy
-      cosyvoice-dev:
+      openvoice-dev:
         condition: service_healthy
     restart: "no"
 

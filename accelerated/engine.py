@@ -95,6 +95,11 @@ class MuseTalkEngine:
         self.audio_padding_right = int(audio_padding_right)
         self.device_name = device
         self.backend = "torch"
+        self.allow_tf32 = os.getenv("MUSETALK_ALLOW_TF32", "1").lower() not in {
+            "0",
+            "false",
+            "no",
+        }
         self._prepared: dict[FrameKey, PreparedFrame] = {}
         self._lock = threading.RLock()
         self._load_models()
@@ -118,9 +123,9 @@ class MuseTalkEngine:
         # Fixed 256x256 batches are faster and avoid multi-second first-shape
         # autotune stalls on RTX 3090 with the current CUDA/PyTorch stack.
         torch.backends.cudnn.benchmark = False
-        torch.backends.cuda.matmul.allow_tf32 = False
-        torch.backends.cudnn.allow_tf32 = False
-        torch.set_float32_matmul_precision("highest")
+        torch.backends.cuda.matmul.allow_tf32 = self.allow_tf32
+        torch.backends.cudnn.allow_tf32 = self.allow_tf32
+        torch.set_float32_matmul_precision("high" if self.allow_tf32 else "highest")
         vae_dir = self.root / "models/sd-vae"
         whisper_dir = self.root / "models/whisper"
         log.info("loading MuseTalk 1.5 %s backend from %s", self.backend, self.root)
@@ -154,7 +159,14 @@ class MuseTalkEngine:
             device=self.device, dtype=self.weight_dtype
         ).eval()
         self.whisper.requires_grad_(False)
-        log.info("MuseTalk 1.5 %s model load complete", self.backend)
+        # Some third-party model constructors change global backend flags.
+        torch.backends.cuda.matmul.allow_tf32 = self.allow_tf32
+        torch.backends.cudnn.allow_tf32 = self.allow_tf32
+        log.info(
+            "MuseTalk 1.5 %s model load complete (tf32=%s)",
+            self.backend,
+            self.allow_tf32,
+        )
 
     def _load_face_parser(self):
         """Load trusted legacy parser weights under PyTorch 2.6+ safely.

@@ -1,4 +1,4 @@
-# LLM + CosyVoice + MuseTalk 流式总服务
+# LLM + OpenVoice + MuseTalk 流式总服务
 
 `server_total` 将三个服务组成有背压的端到端流水线：
 
@@ -6,7 +6,7 @@
 LiteLLM token 流
   -> answer 正文增量
   -> 逐标点 text_unit
-  -> 每个单元调用 CosyVoice 预置或克隆音色
+  -> 每个单元调用 OpenVoice 克隆音色
   -> 每个 PCM 单元独立提交 MuseTalk
   -> 连续时间轴的 PCM/JPEG 媒体包
 ```
@@ -23,10 +23,10 @@ docker compose -f docker-compose.dev.yml up --build
 三个容器分别为：
 
 - `musetalk_dev`：GPU 数字人流式推理，内部端口 `8083`。
-- `cosyvoice_dev`：CosyVoice 常驻语音合成、Whisper 转写和克隆音色，内部端口 `8084`。
+- `openvoice_dev`：OpenVoice V2 常驻语音合成和克隆音色，内部端口 `8084`。
 - `server_total_dev`：流式编排 API，宿主机端口 `8080`。
 
-`server_total` 按每个请求的 `voice_id` 调用 CosyVoice，并把其原生采样率 PCM 统一转换为
+`server_total` 按每个请求的 `voice_id` 调用 OpenVoice，并把 PCM 统一转换为
 16 kHz 后继续原有的逐标点流式管线。MuseTalk 流式服务也只使用 PyTorch：Whisper Encoder、UNet
 和 VAE 直接加载仓库中的 `.pth`/`.bin` 等原生权重。聚合服务会校验 MuseTalk WebSocket
 握手中的 `backend=torch`，防止连接到其他推理后端。运行服务不需要模型导出步骤，也不
@@ -56,20 +56,20 @@ WS   ws://localhost:8080/v1/conversation
   "request_id": "可选的客户端请求ID",
   "question": "请简单介绍一下北京。",
   "profile": "chinese",
-  "voice_id": "customer_service_female",
+  "voice_id": "default",
   "language": "ZH",
   "speed": 1.0
 }
 ```
 
-`GET /v1/voices` 返回 Fish Audio 预置音色和已经保存的用户克隆音色。上传新的克隆音色：
+`GET /v1/voices` 返回默认音色和已经保存的用户克隆音色。上传新的克隆音色：
 
 ```bash
 curl -F "name=我的音色" -F "audio=@reference.wav" http://localhost:8080/v1/voices/clone
 ```
 
-服务会用本地 Whisper 识别中文，标准化为 16 kHz WAV，并持久化到
-`CosyVoice/voice_library/clones/<voice_id>`。返回的 `voice_id` 可直接用于 WebSocket 的
+服务会用本地 VAD 提取参考音频中的有效语音，持久化参考文件和目标音色 embedding 到
+`OpenVoice/voice_library/<voice_id>`。返回的 `voice_id` 可直接用于 WebSocket 的
 `ask`/`speak` 请求；原有的 `speaker` 字段仍作为兼容别名保留。
 
 调用方通过 `profile` 选择本轮推理使用的数字人。省略该字段时使用 `chinese`；例如选择
@@ -110,13 +110,12 @@ LLM 原始增量：
 
 默认切分规则：
 
-- `。！？.!?…` 立即切分。
-- 首单元在 `，、,；;：:—` 处累计满 12 个正文字符后切分，以降低首包延迟。
-- 后续单元在这些软标点处累计满 20 个正文字符后切分，通常保持在 20～40 字。
+- `。！？.!?…` 和 `，、,；;：:—` 默认都立即切分。
 - 连续标点合并在同一个单元中；小数、版本号、时间和 URL 中的标点不会切分。
 - 流结束时，剩余文字无论长短都会作为最后一个单元返回。
 
-可通过 `PIPELINE_FIRST_UNIT_MIN_CHARS` 和 `PIPELINE_TARGET_UNIT_CHARS` 调整两个长度阈值。
+可通过 `PIPELINE_FIRST_UNIT_MIN_CHARS`、`PIPELINE_TARGET_UNIT_CHARS` 和
+`PIPELINE_COALESCE_HARD_DELIMITERS` 调整合并阈值；默认均为逐标点切分。
 
 每个 `text_unit` 都会独立经历：
 
@@ -155,6 +154,6 @@ MuseTalk 内部每个文本单元仍会从序号和 PTS 0 开始，`server_total
 ## 背压与并发
 
 - 文本队列默认最多缓存 4 个单元，可用 `PIPELINE_TEXT_QUEUE_SIZE` 调整。
-- 音频队列默认最多缓存 2 个单元，可用 `PIPELINE_AUDIO_QUEUE_SIZE` 调整。
+- 音频队列默认最多缓存 12 个音频块，可用 `PIPELINE_AUDIO_QUEUE_SIZE` 调整。
 - 单个会话中的 TTS 和 MuseTalk 严格按 `seq` 顺序执行。
 - 每个最终切出的单元都独立进行语音合成。

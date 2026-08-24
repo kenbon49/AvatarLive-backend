@@ -171,6 +171,7 @@ class MuseTalkRuntime:
             "device": self.config.device,
             "backend": "torch",
             "inference_dtype": MuseTalkEngine.inference_dtype,
+            "tf32": self.engine.allow_tf32 if self.engine is not None else None,
             "fps": self.config.fps,
             "batch_size": self.config.batch_size,
             "max_frame_height": self.config.max_frame_height,
