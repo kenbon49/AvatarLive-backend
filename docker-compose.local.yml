@@ -11,6 +11,7 @@ services:
     volumes:
       - /data/MuseTalk/models:/app/models:ro
       - ./cache:/app/cache
+      - ${AVATAR_ASSET_HOST_DIR:-../AvatarLive/runtime/avatar-assets}:/app/data/custom
     environment:
       PYTHONUNBUFFERED: "1"
       CUDA_VISIBLE_DEVICES: "0"
@@ -19,6 +20,8 @@ services:
       MUSETALK_FPS: "${SERVER_TOTAL_MUSETALK_FPS:-15}"
       MUSETALK_BATCH_SIZE: "${SERVER_TOTAL_MUSETALK_BATCH_SIZE:-4}"
       MUSETALK_MAX_FRAME_HEIGHT: "${SERVER_TOTAL_MUSETALK_MAX_FRAME_HEIGHT:-720}"
+      MUSETALK_CUSTOM_AVATAR_DIR: /app/data/custom
+      AVATAR_REGISTRY_KEY: ${AVATAR_REGISTRY_KEY:-}
     command: python3 -u -m accelerated.server --host 0.0.0.0 --port 8083
     restart: unless-stopped
     healthcheck:
@@ -86,6 +89,7 @@ services:
       OPENVOICE_URL: http://openvoice:8084
       OPENVOICE_DEFAULT_VOICE: default
       MUSETALK_WS_URL: ws://musetalk:8083/v1/stream
+      MUSETALK_HTTP_URL: http://musetalk:8083
       PIPELINE_REQUEST_TIMEOUT: "300"
       PIPELINE_FIRST_UNIT_MIN_CHARS: "1"
       PIPELINE_TARGET_UNIT_CHARS: "1"

@@ -9,10 +9,12 @@ import json
 import logging
 import os
 from pathlib import Path
+import secrets
 from typing import Iterator
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
 from .runtime import MuseTalkRuntime, RuntimeConfig
 from .streaming import PACKET_JPEG, PACKET_PCM16, encode_packet, jpeg_bytes
@@ -20,6 +22,10 @@ from .streaming import PACKET_JPEG, PACKET_PCM16, encode_packet, jpeg_bytes
 
 log = logging.getLogger(__name__)
 _END = object()
+
+
+class PrepareAvatarRequest(BaseModel):
+    profile_id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,95}$")
 
 
 def _next_or_end(iterator: Iterator[object]) -> object:
@@ -33,6 +39,7 @@ def create_app(config: RuntimeConfig | None = None) -> FastAPI:
     runtime = MuseTalkRuntime(config or RuntimeConfig.defaults())
     gpu_queue = asyncio.Lock()
     startup_task: asyncio.Task[None] | None = None
+    registry_key = os.getenv("AVATAR_REGISTRY_KEY", "")
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -65,6 +72,34 @@ def create_app(config: RuntimeConfig | None = None) -> FastAPI:
     @app.get("/v1/avatars")
     async def avatars():
         return runtime.status()["avatars"]
+
+    @app.post("/v1/avatars/prepare")
+    async def prepare_avatar(
+        request: PrepareAvatarRequest,
+        x_avatar_registry_key: str | None = Header(default=None),
+    ):
+        if not registry_key or not x_avatar_registry_key or not secrets.compare_digest(
+            registry_key, x_avatar_registry_key
+        ):
+            raise HTTPException(status_code=401, detail="invalid avatar registry key")
+        if not runtime.ready:
+            raise HTTPException(status_code=503, detail="MuseTalk runtime is still loading")
+        try:
+            async with gpu_queue:
+                profile = await asyncio.to_thread(
+                    runtime.prepare_custom_profile, request.profile_id
+                )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except Exception as exc:
+            log.exception("custom avatar preparation failed for %s", request.profile_id)
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {
+            "status": "ready",
+            "profile_id": request.profile_id,
+            "frames": len(profile.frames),
+            "fps": profile.fps,
+        }
 
     @app.websocket("/v1/stream")
     async def stream(websocket: WebSocket):
@@ -116,8 +151,8 @@ def create_app(config: RuntimeConfig | None = None) -> FastAPI:
                 control_type = control.get("type")
                 if control_type == "start":
                     requested = str(control.get("profile", runtime.config.default_avatar))
-                    if requested not in runtime.avatar_specs:
-                        raise ValueError(f"unknown avatar: {requested}")
+                    if not runtime.is_profile_streamable(requested):
+                        raise ValueError(f"unknown or unpublished avatar: {requested}")
                     profile_id = requested
                     if not bool(control.get("continue_from_previous", False)):
                         profile_positions[profile_id] = 0

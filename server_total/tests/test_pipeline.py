@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+from unittest.mock import AsyncMock
 
 from fastapi import WebSocketDisconnect
 from pydantic import ValidationError
@@ -11,7 +12,9 @@ from pydantic import ValidationError
 from server_total.app import (
     AVATAR_CATALOG,
     AskRequest,
+    _musetalk_avatar_catalog,
     _render_units,
+    app,
     avatars,
     conversation,
     run_pipeline,
@@ -81,6 +84,17 @@ class FakeHttpResponse:
         size = chunk_size or len(self.content)
         for offset in range(0, len(self.content), size):
             yield self.content[offset : offset + size]
+
+
+class FakeCatalogResponse:
+    def __init__(self, payload) -> None:
+        self.payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self.payload
 
 
 class FakeStreamContext:
@@ -155,8 +169,42 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         for profile_id in profile_ids:
             request = AskRequest(type="ask", question="介绍能力", profile=profile_id)
             self.assertEqual(request.profile, profile_id)
+        self.assertEqual(
+            AskRequest(type="ask", question="介绍能力", profile="custom-avatar_v1").profile,
+            "custom-avatar_v1",
+        )
         with self.assertRaises(ValidationError):
-            AskRequest(type="ask", question="介绍能力", profile="unknown")
+            AskRequest(type="ask", question="介绍能力", profile="../unknown")
+
+    async def test_catalog_only_exposes_published_custom_avatars(self):
+        response = FakeCatalogResponse(
+            [
+                {"id": "custom-review_v1", "custom": True, "prepared": True, "status": "review"},
+                {"id": "custom-cold_v1", "custom": True, "prepared": False, "status": "ready"},
+                {
+                    "id": "custom-ready_v1",
+                    "name": "已发布形象",
+                    "custom": True,
+                    "prepared": True,
+                    "status": "ready",
+                },
+            ]
+        )
+        http = SimpleNamespace(get=AsyncMock(return_value=response))
+        with patch.object(app.state, "http", http, create=True):
+            catalog = await _musetalk_avatar_catalog()
+
+        self.assertEqual([item["id"] for item in catalog], ["custom-ready_v1"])
+
+    async def test_conversation_rejects_unpublished_profile(self):
+        socket = FakeConversationSocket(
+            [{"type": "ask", "question": "测试", "profile": "custom-review_v1"}]
+        )
+
+        await conversation(socket)
+
+        self.assertEqual(socket.json_messages[-1]["stage"], "request")
+        self.assertIn("unknown or unpublished avatar", socket.json_messages[-1]["message"])
 
     async def test_rejects_non_torch_musetalk_backend(self):
         upstream = FakeUpstream(['{"type":"ready","fps":25,"backend":"onnx"}'])

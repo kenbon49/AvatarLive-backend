@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 from typing import Any, AsyncIterator, Literal
 from uuid import uuid4
@@ -39,6 +40,7 @@ log = logging.getLogger("server-total")
 OPENVOICE_URL = os.getenv("OPENVOICE_URL", "http://localhost:8084").rstrip("/")
 DEFAULT_VOICE_ID = os.getenv("OPENVOICE_DEFAULT_VOICE", "default")
 MUSETALK_WS_URL = os.getenv("MUSETALK_WS_URL", "ws://localhost:8083/v1/stream")
+MUSETALK_HTTP_URL = os.getenv("MUSETALK_HTTP_URL", "http://localhost:8083").rstrip("/")
 MUSETALK_BACKEND = "torch"
 MUSETALK_INFERENCE_DTYPE = "float32"
 REQUEST_TIMEOUT = float(os.getenv("PIPELINE_REQUEST_TIMEOUT", "300"))
@@ -59,11 +61,8 @@ COALESCE_HARD_DELIMITERS = os.getenv(
     "PIPELINE_COALESCE_HARD_DELIMITERS", "0"
 ).lower() not in {"0", "false", "no"}
 _END = object()
-AvatarProfile = Literal[
-    "chinese",
-    "business_male_1",
-    "chen_yu",
-]
+AvatarProfile = str
+AVATAR_PROFILE_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,95}$"
 DEFAULT_AVATAR_PROFILE: AvatarProfile = "chinese"
 AVATAR_CATALOG = (
     {"id": "chinese", "name": "Chinese", "default": True},
@@ -76,7 +75,9 @@ class AskRequest(BaseModel):
     type: Literal["ask"]
     question: str = Field(min_length=1, max_length=2000)
     request_id: str | None = Field(default=None, min_length=1, max_length=128)
-    profile: AvatarProfile = DEFAULT_AVATAR_PROFILE
+    profile: AvatarProfile = Field(
+        default=DEFAULT_AVATAR_PROFILE, pattern=AVATAR_PROFILE_PATTERN
+    )
     language: Literal["ZH", "EN"] = "ZH"
     voice_id: str | None = Field(default=None, min_length=1, max_length=64)
     speaker: str | None = None
@@ -92,7 +93,9 @@ class SpeakRequest(BaseModel):
     type: Literal["speak"]
     text: str = Field(min_length=1, max_length=2000)
     request_id: str | None = Field(default=None, min_length=1, max_length=128)
-    profile: AvatarProfile = DEFAULT_AVATAR_PROFILE
+    profile: AvatarProfile = Field(
+        default=DEFAULT_AVATAR_PROFILE, pattern=AVATAR_PROFILE_PATTERN
+    )
     language: Literal["ZH", "EN"] = "ZH"
     voice_id: str | None = Field(default=None, min_length=1, max_length=64)
     speaker: str | None = None
@@ -163,6 +166,42 @@ app.add_middleware(
 )
 
 
+async def _musetalk_avatar_catalog() -> tuple[dict[str, object], ...]:
+    static_names = {str(item["id"]): str(item["name"]) for item in AVATAR_CATALOG}
+    try:
+        response = await app.state.http.get(f"{MUSETALK_HTTP_URL}/v1/avatars")
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, list):
+            raise ValueError("MuseTalk avatar catalog is not a list")
+        catalog: list[dict[str, object]] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            profile_id = str(item.get("id") or "")
+            if not re.fullmatch(AVATAR_PROFILE_PATTERN, profile_id):
+                continue
+            if item.get("custom") and (
+                item.get("status") != "ready" or not item.get("prepared")
+            ):
+                continue
+            catalog.append(
+                {
+                    "id": profile_id,
+                    "name": static_names.get(profile_id, str(item.get("name") or profile_id)),
+                    "default": profile_id == DEFAULT_AVATAR_PROFILE,
+                    "custom": bool(item.get("custom")),
+                    "avatar_id": str(item.get("avatar_id") or profile_id),
+                    "version": str(item.get("version") or ""),
+                }
+            )
+        if catalog:
+            return tuple(catalog)
+    except (AttributeError, httpx.HTTPError, ValueError, TypeError):
+        log.warning("failed to refresh avatar catalog from MuseTalk")
+    return AVATAR_CATALOG
+
+
 @app.get("/health")
 async def health() -> dict[str, object]:
     llm = app.state.llm.config
@@ -179,6 +218,7 @@ async def health() -> dict[str, object]:
         "openvoice_url": OPENVOICE_URL,
         "default_voice_id": DEFAULT_VOICE_ID,
         "musetalk_ws_url": MUSETALK_WS_URL,
+        "musetalk_http_url": MUSETALK_HTTP_URL,
         "musetalk_backend": MUSETALK_BACKEND,
         "musetalk_inference_dtype": MUSETALK_INFERENCE_DTYPE,
         "default_avatar": DEFAULT_AVATAR_PROFILE,
@@ -189,9 +229,10 @@ async def health() -> dict[str, object]:
 
 @app.get("/v1/avatars")
 async def avatars() -> dict[str, object]:
+    catalog = await _musetalk_avatar_catalog()
     return {
         "default": DEFAULT_AVATAR_PROFILE,
-        "avatars": AVATAR_CATALOG,
+        "avatars": catalog,
     }
 
 
@@ -820,6 +861,8 @@ async def _run_and_report(
 async def conversation(websocket: WebSocket) -> None:
     await websocket.accept()
     sender = FrontendSender(websocket)
+    avatar_catalog = await _musetalk_avatar_catalog()
+    available_profiles = {str(item["id"]) for item in avatar_catalog}
     await sender.send_json(
         {
             "type": "ready",
@@ -828,7 +871,7 @@ async def conversation(websocket: WebSocket) -> None:
             "sample_rate": 16000,
             "playback_buffer_seconds": PLAYBACK_BUFFER_SECONDS,
             "default_profile": DEFAULT_AVATAR_PROFILE,
-            "avatars": AVATAR_CATALOG,
+            "avatars": avatar_catalog,
         }
     )
     active_task: asyncio.Task[None] | None = None
@@ -900,6 +943,16 @@ async def conversation(websocket: WebSocket) -> None:
                         "type": "error",
                         "stage": "request",
                         "message": f"unknown message type: {message_type!r}",
+                    }
+                )
+                continue
+
+            if request.profile not in available_profiles:
+                await sender.send_json(
+                    {
+                        "type": "error",
+                        "stage": "request",
+                        "message": f"unknown or unpublished avatar: {request.profile}",
                     }
                 )
                 continue
