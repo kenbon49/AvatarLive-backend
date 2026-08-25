@@ -76,6 +76,8 @@ services:
     build:
       context: .
       dockerfile: server_total/Dockerfile
+      args:
+        REGISTRY: ${REGISTRY:-}
     image: avatarlive-backend-server-total:local
     ports:
       - "8085:8080"

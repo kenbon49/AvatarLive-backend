@@ -62,7 +62,8 @@ WS   ws://localhost:8080/v1/conversation
 }
 ```
 
-`GET /v1/voices` 返回默认音色和已经保存的用户克隆音色。上传新的克隆音色：
+`GET /v1/voices` 将 OpenVoice 的 speaker 目录规范化为 `voices`，返回默认音色和已经
+保存的用户克隆音色。旧版 Web 使用的预设音色 ID 会兼容映射到 `default`。上传新的克隆音色：
 
 ```bash
 curl -F "name=我的音色" -F "audio=@reference.wav" http://localhost:8080/v1/voices/clone

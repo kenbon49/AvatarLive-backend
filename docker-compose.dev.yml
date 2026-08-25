@@ -103,6 +103,8 @@ services:
     build:
       context: .
       dockerfile: server_total/Dockerfile
+      args:
+        REGISTRY: ${REGISTRY:-}
 
     container_name: server_total_dev
     image: musetalk-server-total:dev

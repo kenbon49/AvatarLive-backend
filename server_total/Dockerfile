@@ -1,4 +1,5 @@
-FROM python:3.10-slim
+ARG REGISTRY=
+FROM ${REGISTRY}python:3.10-slim
 
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \

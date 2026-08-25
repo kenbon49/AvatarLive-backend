@@ -39,6 +39,14 @@ from .segmenter import PunctuationSegmenter, TextUnit
 log = logging.getLogger("server-total")
 OPENVOICE_URL = os.getenv("OPENVOICE_URL", "http://localhost:8084").rstrip("/")
 DEFAULT_VOICE_ID = os.getenv("OPENVOICE_DEFAULT_VOICE", "default")
+LEGACY_VOICE_IDS = frozenset(
+    {
+        "default_female",
+        "customer_service_female",
+        "gentle_female",
+        "corporate_narrator_male",
+    }
+)
 MUSETALK_WS_URL = os.getenv("MUSETALK_WS_URL", "ws://localhost:8083/v1/stream")
 MUSETALK_HTTP_URL = os.getenv("MUSETALK_HTTP_URL", "http://localhost:8083").rstrip("/")
 MUSETALK_BACKEND = "torch"
@@ -241,8 +249,30 @@ async def voices() -> dict[str, object]:
     try:
         response = await app.state.http.get(f"{OPENVOICE_URL}/v1/speakers")
         response.raise_for_status()
-        return response.json()
-    except httpx.HTTPError as exc:
+        payload = response.json()
+        speakers = payload.get("speakers", [])
+        if not isinstance(speakers, list):
+            raise ValueError("OpenVoice returned an invalid speaker catalog")
+        catalog = []
+        for speaker in speakers:
+            if not isinstance(speaker, dict) or not isinstance(speaker.get("id"), str):
+                continue
+            catalog.append(
+                {
+                    "voice_id": speaker["id"],
+                    "name": speaker.get("name") or speaker["id"],
+                    "kind": "preset" if speaker.get("default") is True else "clone",
+                    "source": {"provider": "OpenVoice"},
+                }
+            )
+        default_voice = payload.get("default", DEFAULT_VOICE_ID)
+        return {
+            "default": default_voice
+            if isinstance(default_voice, str)
+            else DEFAULT_VOICE_ID,
+            "voices": catalog,
+        }
+    except (AttributeError, TypeError, ValueError, httpx.HTTPError) as exc:
         raise HTTPException(
             status_code=502, detail=f"OpenVoice is unavailable: {exc}"
         ) from exc
@@ -287,6 +317,8 @@ async def stream_speech_chunks(
     first_chunk_seconds: float | None = None,
 ) -> AsyncIterator[tuple[bytes, float]]:
     voice_id = request.voice_id or request.speaker or DEFAULT_VOICE_ID
+    if voice_id in LEGACY_VOICE_IDS:
+        voice_id = DEFAULT_VOICE_ID
     async with app_.state.http.stream(
         "POST",
         f"{OPENVOICE_URL}/v1/voice-clone",

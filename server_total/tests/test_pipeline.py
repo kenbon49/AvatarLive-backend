@@ -20,6 +20,7 @@ from server_total.app import (
     run_pipeline,
     stream_speech_chunks,
     synthesize_speech,
+    voices,
 )
 from server_total.protocol import PACKET_HEADER, remap_media_packet
 
@@ -136,6 +137,39 @@ def media_packet(
 
 
 class PipelineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_normalizes_openvoice_speaker_catalog_for_web_clients(self):
+        response = FakeCatalogResponse(
+            {
+                "default": "default",
+                "speakers": [
+                    {"id": "default", "name": "Default voice", "default": True},
+                    {"id": "custom-voice", "name": "Custom voice", "default": False},
+                ],
+            }
+        )
+        http = SimpleNamespace(get=AsyncMock(return_value=response))
+        with patch.object(app.state, "http", http, create=True):
+            catalog = await voices()
+
+        self.assertEqual(catalog["default"], "default")
+        self.assertEqual(
+            catalog["voices"],
+            [
+                {
+                    "voice_id": "default",
+                    "name": "Default voice",
+                    "kind": "preset",
+                    "source": {"provider": "OpenVoice"},
+                },
+                {
+                    "voice_id": "custom-voice",
+                    "name": "Custom voice",
+                    "kind": "clone",
+                    "source": {"provider": "OpenVoice"},
+                },
+            ],
+        )
+
     async def test_speak_splits_text_at_punctuation(self):
         from server_total.app import _produce_text_units
 
@@ -276,7 +310,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             [duration for _pcm, duration in chunks], [0.5, 1.0, 0.25]
         )
 
-    async def test_synthesize_resamples_openvoice_pcm_and_forwards_voice_id(self):
+    async def test_synthesize_resamples_pcm_and_migrates_legacy_voice_id(self):
         class NativeRateResponse(FakeHttpResponse):
             content = bytes(4800)
             headers = {
@@ -302,8 +336,21 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(pcm), 3200)
         self.assertEqual(duration, 0.1)
         self.assertEqual(
-            http.request[1]["data"]["speaker_id"], "customer_service_female"
+            http.request[1]["data"]["speaker_id"], "default"
         )
+
+    async def test_synthesize_forwards_registered_clone_voice_id(self):
+        http = FakeHttpClient()
+        fake_app = SimpleNamespace(state=SimpleNamespace(http=http))
+        request = AskRequest(
+            type="ask",
+            question="你好",
+            voice_id="my-cloned-voice",
+        )
+
+        await synthesize_speech(fake_app, request, "克隆音色测试")
+
+        self.assertEqual(http.request[1]["data"]["speaker_id"], "my-cloned-voice")
 
     async def test_pipeline_streams_each_text_unit_through_tts_and_musetalk(self):
         upstream = FakeUpstream(
