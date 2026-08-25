@@ -101,9 +101,10 @@ class BaseSpeakerTTS(OpenVoiceBaseClass):
 
 class ToneColorConverter(OpenVoiceBaseClass):
     def __init__(self, *args, **kwargs):
+        enable_watermark = kwargs.pop('enable_watermark', True)
         super().__init__(*args, **kwargs)
 
-        if kwargs.get('enable_watermark', True):
+        if enable_watermark:
             import wavmark
             local_watermark = Path(__file__).resolve().parent.parent / 'checkpoints' / 'auxiliary' / 'wavmark.pth'
             if not local_watermark.is_file():

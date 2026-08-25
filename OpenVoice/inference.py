@@ -97,7 +97,7 @@ def load_converter(version: str, device: str):
     require_file(config, "转换模型配置")
     require_file(checkpoint, "转换模型权重")
 
-    model = ToneColorConverter(str(config), device=device)
+    model = ToneColorConverter(str(config), device=device, enable_watermark=False)
     model.load_ckpt(str(checkpoint))
     return model
 
