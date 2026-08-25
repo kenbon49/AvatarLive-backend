@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+import io
 import json
 import logging
 import math
@@ -12,7 +13,9 @@ import os
 import re
 import time
 from typing import Any, AsyncIterator, Literal
+from urllib.parse import quote
 from uuid import uuid4
+import wave
 
 from fastapi import (
     FastAPI,
@@ -24,6 +27,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 import httpx
 import numpy as np
 from pydantic import BaseModel, Field, ValidationError
@@ -262,7 +266,12 @@ async def voices() -> dict[str, object]:
                     "voice_id": speaker["id"],
                     "name": speaker.get("name") or speaker["id"],
                     "kind": "preset" if speaker.get("default") is True else "clone",
-                    "source": {"provider": "OpenVoice"},
+                    "source": {
+                        "provider": "OpenVoice",
+                        "sample_url": (
+                            f"/v1/voices/{quote(speaker['id'], safe='')}/preview"
+                        ),
+                    },
                 }
             )
         default_voice = payload.get("default", DEFAULT_VOICE_ID)
@@ -307,6 +316,44 @@ async def create_cloned_voice(
             detail = response.text
         raise HTTPException(status_code=response.status_code, detail=detail)
     return response.json()
+
+
+def _wav_from_pcm(pcm: bytes, sample_rate: int = 16000) -> bytes:
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(pcm)
+    return output.getvalue()
+
+
+@app.get("/v1/voices/{voice_id}/preview")
+async def voice_preview(voice_id: str) -> Response:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", voice_id):
+        raise HTTPException(status_code=400, detail="invalid voice id")
+    request = SpeakRequest(
+        type="speak",
+        text="你好，很高兴认识你。这是我的声音试听。",
+        voice_id=voice_id,
+    )
+    try:
+        pcm, _duration = await synthesize_speech(app, request, request.text)
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        raise HTTPException(
+            status_code=status if 400 <= status < 500 else 502,
+            detail="OpenVoice preview is unavailable",
+        ) from exc
+    except (RuntimeError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=502, detail=f"OpenVoice preview failed: {exc}"
+        ) from exc
+    return Response(
+        content=_wav_from_pcm(pcm),
+        media_type="audio/wav",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 async def stream_speech_chunks(

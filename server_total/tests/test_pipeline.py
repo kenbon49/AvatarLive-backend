@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import io
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from unittest.mock import AsyncMock
+import wave
 
 from fastapi import WebSocketDisconnect
 from pydantic import ValidationError
@@ -20,6 +22,7 @@ from server_total.app import (
     run_pipeline,
     stream_speech_chunks,
     synthesize_speech,
+    voice_preview,
     voices,
 )
 from server_total.protocol import PACKET_HEADER, remap_media_packet
@@ -159,16 +162,39 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                     "voice_id": "default",
                     "name": "Default voice",
                     "kind": "preset",
-                    "source": {"provider": "OpenVoice"},
+                    "source": {
+                        "provider": "OpenVoice",
+                        "sample_url": "/v1/voices/default/preview",
+                    },
                 },
                 {
                     "voice_id": "custom-voice",
                     "name": "Custom voice",
                     "kind": "clone",
-                    "source": {"provider": "OpenVoice"},
+                    "source": {
+                        "provider": "OpenVoice",
+                        "sample_url": "/v1/voices/custom-voice/preview",
+                    },
                 },
             ],
         )
+
+    async def test_voice_preview_returns_browser_playable_wav(self):
+        pcm = bytes(range(64))
+        with patch(
+            "server_total.app.synthesize_speech",
+            AsyncMock(return_value=(pcm, len(pcm) / 32000)),
+        ) as synthesize:
+            response = await voice_preview("custom-voice")
+
+        self.assertEqual(response.media_type, "audio/wav")
+        self.assertEqual(response.headers["cache-control"], "public, max-age=86400")
+        with wave.open(io.BytesIO(response.body), "rb") as wav:
+            self.assertEqual(wav.getnchannels(), 1)
+            self.assertEqual(wav.getsampwidth(), 2)
+            self.assertEqual(wav.getframerate(), 16000)
+            self.assertEqual(wav.readframes(wav.getnframes()), pcm)
+        self.assertEqual(synthesize.await_args.args[1].voice_id, "custom-voice")
 
     async def test_speak_splits_text_at_punctuation(self):
         from server_total.app import _produce_text_units
