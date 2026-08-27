@@ -6,9 +6,12 @@ MuseTalk v1.5、Whisper、VAE 和 UNet；头像视频的脸框、VAE latent 与�
 
 ## 公共形象
 
-- `chinese`：`data/public/chinese2.mp4`，默认公共形象。
+- `chinese`：`data/public/chinese2-cycle-4to7.mp4`，默认公共形象；与前端静息态共用动作周期。
 - `business_male_1`：`data/public/商务男确定.mp4`。
 - `chen_yu`：`data/public/陈屿.mp4`。
+
+流式渲染的最后一个批次会保留不足一帧的 PCM 尾音；视频仍按配置 FPS
+生成，音频时间轴则以完整的 16 kHz 样本数为准，避免分块边界吞音。
 
 公共可选数字人视频统一存放在 `data/public/`。新增形象时应将源视频放入该目录，
 并在 `accelerated/runtime.py` 的 `avatar_specs` 中注册对应的形象 ID。

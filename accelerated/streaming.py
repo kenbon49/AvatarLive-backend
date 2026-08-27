@@ -87,6 +87,13 @@ class StreamingRenderer:
         features = self.engine.extract_audio_features(pcm, self.fps)
         frame_count = len(features)
         if frame_count == 0:
+            # Audio shorter than one video frame still belongs on the media timeline.
+            # The player holds the previous image while this tail is heard.
+            yield RenderedBatch(
+                0,
+                np.empty((0, 0, 0, 3), dtype=np.uint8),
+                pcm16le,
+            )
             return
         # The caller owns playback position. Keeping it on this shared renderer made
         # a new request inherit frames from a previous user's request.
@@ -97,7 +104,11 @@ class StreamingRenderer:
             avatar_frames = profile.sequence(start_position + start, count)
             rendered = self.engine.render_batch(features[start : start + count], avatar_frames)
             sample_start = round(start * samples_per_frame)
-            sample_end = min(len(pcm), round((start + count) * samples_per_frame))
+            sample_end = (
+                len(pcm)
+                if start + count >= frame_count
+                else min(len(pcm), round((start + count) * samples_per_frame))
+            )
             audio = np.clip(np.rint(pcm[sample_start:sample_end] * 32768.0), -32768, 32767)
             yield RenderedBatch(start, rendered, audio.astype("<i2").tobytes())
 

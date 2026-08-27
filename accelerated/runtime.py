@@ -19,7 +19,7 @@ from .streaming import StreamingRenderer
 log = logging.getLogger(__name__)
 
 PUBLIC_AVATAR_FILES = {
-    "chinese": "chinese2.mp4",
+    "chinese": "chinese2-cycle-4to7.mp4",
     "business_male_1": "商务男确定.mp4",
     "chen_yu": "陈屿.mp4",
 }
@@ -39,6 +39,7 @@ class RuntimeConfig:
     detection_stride: int = 5
     max_frame_height: int = 0
     batch_size: int = 12
+    jpeg_quality: int = 92
     device: str = "cuda:0"
 
     @classmethod
@@ -58,6 +59,8 @@ class MuseTalkRuntime:
     """Own the single model instance and lazily prepared avatar profiles."""
 
     def __init__(self, config: RuntimeConfig) -> None:
+        if not 1 <= config.jpeg_quality <= 100:
+            raise ValueError("jpeg quality must be between 1 and 100")
         self.config = config
         public_avatar_dir = config.public_avatar_dir or config.root / "data" / "public"
         self.engine: MuseTalkEngine | None = None
@@ -275,6 +278,7 @@ class MuseTalkRuntime:
             "fps": self.config.fps,
             "batch_size": self.config.batch_size,
             "max_frame_height": self.config.max_frame_height,
+            "jpeg_quality": self.config.jpeg_quality,
             "model_devices": model_devices,
             "model_dtypes": model_dtypes,
             "gpu_ready": gpu_ready,

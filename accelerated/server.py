@@ -7,6 +7,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import secrets
@@ -33,6 +34,16 @@ def _next_or_end(iterator: Iterator[object]) -> object:
         return next(iterator)
     except StopIteration:
         return _END
+
+
+def _advance_profile_phase(
+    start_phase: float,
+    pcm_byte_count: int,
+    fps: float,
+    cycle_length: int,
+) -> float:
+    audio_frames = pcm_byte_count / 2 / 16000 * fps
+    return (start_phase + audio_frames) % cycle_length
 
 
 def create_app(config: RuntimeConfig | None = None) -> FastAPI:
@@ -119,7 +130,7 @@ def create_app(config: RuntimeConfig | None = None) -> FastAPI:
         audio = bytearray()
         # Playback position belongs to this WebSocket session, never the shared
         # renderer. A fresh start therefore always begins at the source first frame.
-        profile_positions: dict[str, int] = {}
+        profile_phases: dict[str, float] = {}
         max_audio_bytes = 16000 * 2 * 120
         try:
             await websocket.send_json(
@@ -129,6 +140,7 @@ def create_app(config: RuntimeConfig | None = None) -> FastAPI:
                     "sample_rate": 16000,
                     "audio_format": "pcm_s16le_mono",
                     "fps": runtime.config.fps,
+                    "jpeg_quality": runtime.config.jpeg_quality,
                     "backend": "torch",
                     "inference_dtype": runtime.engine.inference_dtype,
                     "packet_header": "<4sBBHIIQ",
@@ -155,9 +167,20 @@ def create_app(config: RuntimeConfig | None = None) -> FastAPI:
                         raise ValueError(f"unknown or unpublished avatar: {requested}")
                     profile_id = requested
                     if not bool(control.get("continue_from_previous", False)):
-                        profile_positions[profile_id] = 0
+                        start_position = int(control.get("start_position", 0))
+                        if not 0 <= start_position <= 10_000_000:
+                            raise ValueError("start_position is outside the supported range")
+                        profile_phases[profile_id] = float(start_position)
                     audio.clear()
-                    await websocket.send_json({"type": "started", "profile": profile_id})
+                    await websocket.send_json(
+                        {
+                            "type": "started",
+                            "profile": profile_id,
+                            "start_position": math.floor(
+                                profile_phases.get(profile_id, 0.0)
+                            ),
+                        }
+                    )
                 elif control_type == "cancel":
                     audio.clear()
                     await websocket.send_json({"type": "cancelled"})
@@ -171,14 +194,14 @@ def create_app(config: RuntimeConfig | None = None) -> FastAPI:
                         profile = await asyncio.to_thread(runtime.get_profile, profile_id)
                         if runtime.renderer is None:
                             raise RuntimeError("streaming renderer is unavailable")
-                        start_position = profile_positions.get(profile_id, 0)
+                        start_phase = profile_phases.get(profile_id, 0.0)
+                        start_position = math.floor(start_phase)
                         iterator = runtime.renderer.render(
                             pcm,
                             profile,
                             start_position=start_position,
                         )
                         sequence = 0
-                        rendered_frames = 0
                         await websocket.send_json({"type": "stream_start", "profile": profile_id})
                         pending: asyncio.Task[object] | None = asyncio.create_task(
                             asyncio.to_thread(_next_or_end, iterator)
@@ -189,7 +212,6 @@ def create_app(config: RuntimeConfig | None = None) -> FastAPI:
                                 pending = None
                                 if batch is _END:
                                     break
-                                rendered_frames += len(batch.frames)
                                 # Render the next GPU batch while this batch is encoded and sent.
                                 pending = asyncio.create_task(
                                     asyncio.to_thread(_next_or_end, iterator)
@@ -206,7 +228,7 @@ def create_app(config: RuntimeConfig | None = None) -> FastAPI:
                                     pts_us = round(
                                         frame_number / runtime.config.fps * 1_000_000
                                     )
-                                    payload = jpeg_bytes(frame)
+                                    payload = jpeg_bytes(frame, runtime.config.jpeg_quality)
                                     await websocket.send_bytes(
                                         encode_packet(PACKET_JPEG, sequence, pts_us, payload)
                                     )
@@ -220,9 +242,12 @@ def create_app(config: RuntimeConfig | None = None) -> FastAPI:
                                 except Exception:
                                     log.exception("prefetched render batch failed during cleanup")
                             iterator.close()
-                            profile_positions[profile_id] = (
-                                start_position + rendered_frames
-                            ) % profile.cycle_length
+                            profile_phases[profile_id] = _advance_profile_phase(
+                                start_phase,
+                                len(pcm),
+                                runtime.config.fps,
+                                profile.cycle_length,
+                            )
                         await websocket.send_json(
                             {"type": "stream_end", "packets": sequence, "profile": profile_id}
                         )
@@ -258,6 +283,11 @@ def main() -> None:
         type=int,
         default=int(os.getenv("MUSETALK_MAX_FRAME_HEIGHT", "0")),
     )
+    parser.add_argument(
+        "--jpeg-quality",
+        type=int,
+        default=int(os.getenv("MUSETALK_JPEG_QUALITY", "92")),
+    )
     parser.add_argument("--device", default=os.getenv("MUSETALK_DEVICE", "cuda:0"))
     args = parser.parse_args()
 
@@ -270,6 +300,7 @@ def main() -> None:
             "fps": args.fps,
             "batch_size": args.batch_size,
             "max_frame_height": args.max_frame_height,
+            "jpeg_quality": args.jpeg_quality,
             "device": args.device,
         }
     )

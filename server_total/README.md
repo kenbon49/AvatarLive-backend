@@ -42,7 +42,7 @@ WS   ws://localhost:8080/v1/conversation
 
 `GET /v1/avatars` 返回三个已在 MuseTalk 启动阶段完成预处理的公共形象：
 
-- `chinese`（默认）：`data/public/chinese2.mp4`
+- `chinese`（默认）：`data/public/chinese2-cycle-4to7.mp4`
 - `business_male_1`：`data/public/商务男确定.mp4`
 - `chen_yu`：`data/public/陈屿.mp4`
 

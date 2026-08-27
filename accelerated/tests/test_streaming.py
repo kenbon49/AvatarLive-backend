@@ -19,13 +19,15 @@ class FakeEngine:
 
     def __init__(self):
         self.feature_inputs = []
+        self.render_batch_calls = 0
 
     def extract_audio_features(self, pcm16k, fps):
         self.feature_inputs.append(pcm16k.copy())
-        count = int(len(pcm16k) / 16000 * fps)
+        count = int(np.ceil(len(pcm16k) / 16000 * fps))
         return np.zeros((count, 50, 384), dtype=np.float32)
 
     def render_batch(self, audio_features, frames):
+        self.render_batch_calls += 1
         return np.stack([frame.frame for frame in frames])
 
 
@@ -73,6 +75,33 @@ class StreamingTests(unittest.TestCase):
         self.assertEqual([batch.start_frame for batch in batches], [0, 2])
         self.assertEqual(len(engine.feature_inputs), 1)
         self.assertFalse(np.any(engine.feature_inputs[0]))
+
+    def test_renderer_keeps_the_non_frame_aligned_pcm_tail(self):
+        profile = make_profile()
+        engine = FakeEngine()
+        renderer = StreamingRenderer(engine, fps=25)
+        samples = np.arange(4 * 640 + 137, dtype="<i2")
+
+        batches = list(renderer.render(samples.tobytes(), profile))
+
+        self.assertEqual(b"".join(batch.pcm16 for batch in batches), samples.tobytes())
+        self.assertEqual([len(batch.frames) for batch in batches], [2, 2, 1])
+
+    def test_renderer_keeps_pcm_shorter_than_one_video_frame(self):
+        profile = make_profile()
+        engine = FakeEngine()
+        engine.extract_audio_features = lambda _pcm, _fps: np.empty(
+            (0, 50, 384), dtype=np.float32
+        )
+        renderer = StreamingRenderer(engine, fps=15)
+        samples = np.arange(500, dtype="<i2")
+
+        batches = list(renderer.render(samples.tobytes(), profile))
+
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(len(batches[0].frames), 0)
+        self.assertEqual(batches[0].pcm16, samples.tobytes())
+        self.assertEqual(engine.render_batch_calls, 0)
 
     def test_renderer_does_not_carry_position_between_requests(self):
         profile = make_profile()

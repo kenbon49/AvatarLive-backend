@@ -31,6 +31,7 @@ log = logging.getLogger(__name__)
 RGBFrame = NDArray[np.uint8]
 FrameKey = tuple[str, str, int]
 _LEGACY_PROFILE_ID = "__legacy__"
+_WHISPER_FEATURES_PER_SECOND = 50
 
 
 class MuseTalkSetupError(RuntimeError):
@@ -502,9 +503,25 @@ class MuseTalkEngine:
         """Return one CPU Whisper prompt per output video frame."""
 
         pcm = np.asarray(pcm16k, dtype=np.float32).reshape(-1)
-        frame_count = math.floor(len(pcm) / 16000.0 * int(fps))
+        video_fps = int(fps)
+        if video_fps <= 0:
+            raise ValueError("fps must be positive")
+        frame_count = math.ceil(len(pcm) / 16000.0 * video_fps)
         if frame_count <= 0:
             return self.torch.empty((0, 50, 384), dtype=self.weight_dtype)
+        original_sample_count = len(pcm)
+        feature_window = 2 * (
+            self.audio_padding_left + self.audio_padding_right + 1
+        )
+        minimum_samples = math.ceil(
+            feature_window * 16000 / _WHISPER_FEATURES_PER_SECOND
+        )
+        minimum_samples = max(
+            minimum_samples,
+            math.ceil(frame_count * 16000 / video_fps),
+        )
+        if original_sample_count < minimum_samples:
+            pcm = np.pad(pcm, (0, minimum_samples - original_sample_count))
         segment_size = 30 * 16000
         features = []
         with self._lock, self.torch.inference_mode():
@@ -516,17 +533,26 @@ class MuseTalkEngine:
                     sampling_rate=16000,
                 ).input_features
                 features.append(feature.to(dtype=self.weight_dtype))
-            chunks = self.audio_processor.get_whisper_chunk(
-                features,
-                self.device,
-                self.weight_dtype,
-                self.whisper,
-                len(pcm),
-                fps=fps,
-                audio_padding_length_left=self.audio_padding_left,
-                audio_padding_length_right=self.audio_padding_right,
+            try:
+                chunks = self.audio_processor.get_whisper_chunk(
+                    features,
+                    self.device,
+                    self.weight_dtype,
+                    self.whisper,
+                    len(pcm),
+                    fps=fps,
+                    audio_padding_length_left=self.audio_padding_left,
+                    audio_padding_length_right=self.audio_padding_right,
+                )
+            except SystemExit as exc:
+                # Upstream MuseTalk calls exit() for malformed feature windows.
+                # Keep a single bad utterance from terminating the whole service.
+                raise RuntimeError("MuseTalk audio feature extraction failed") from exc
+        if len(chunks) < frame_count:
+            raise RuntimeError(
+                f"MuseTalk returned {len(chunks)} audio features for {frame_count} frames"
             )
-        return chunks.detach().cpu()
+        return chunks[:frame_count].detach().cpu()
 
     @staticmethod
     def blend_face(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -405,6 +406,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             question="介绍能力",
             request_id="request-1",
             profile="business_male_1",
+            source_time_seconds=0.55,
         )
         pcm = bytes(3200)
         synthesized_texts = []
@@ -447,7 +449,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 (1, "识别图像。", "。"),
             ],
         )
-        self.assertEqual([item["pts_us"] for item in text_units], [0, 160_000])
+        self.assertEqual([item["pts_us"] for item in text_units], [0, 200_000])
         for text_unit in text_units:
             text_index = frontend.json_messages.index(text_unit)
             next_message = frontend.json_messages[text_index + 1]
@@ -463,8 +465,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         first_cont = PACKET_HEADER.unpack_from(frontend.binary_messages[1])
         second = PACKET_HEADER.unpack_from(frontend.binary_messages[2])
         self.assertEqual((first[4], first[6]), (0, 0))
-        self.assertEqual((first_cont[4], first_cont[6]), (1, 90_000))
-        self.assertEqual((second[4], second[6]), (2, 160_000))
+        self.assertEqual((first_cont[4], first_cont[6]), (1, 110_000))
+        self.assertEqual((second[4], second[6]), (2, 200_000))
         self.assertEqual(frontend.json_messages[-1]["type"], "conversation_end")
         self.assertEqual(frontend.json_messages[-1]["units"], 2)
         commits = [
@@ -476,6 +478,10 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(starts), 3)
         self.assertTrue(all('"profile": "business_male_1"' in item for item in starts))
+        parsed_starts = [json.loads(item) for item in starts]
+        self.assertTrue(all(item["start_position"] == 13 for item in parsed_starts))
+        self.assertFalse(parsed_starts[0]["continue_from_previous"])
+        self.assertTrue(all(item["continue_from_previous"] for item in parsed_starts[1:]))
 
     async def test_pipeline_does_not_deadlock_when_musetalk_fails(self):
         upstream = FakeUpstream(

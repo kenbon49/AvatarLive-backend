@@ -15,6 +15,10 @@ from accelerated.runtime import MuseTalkRuntime, PUBLIC_AVATAR_FILES, RuntimeCon
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_rejects_invalid_jpeg_quality(self):
+        with self.assertRaisesRegex(ValueError, "jpeg quality"):
+            MuseTalkRuntime(replace(RuntimeConfig.defaults(), jpeg_quality=101))
+
     def test_avatar_loader_limits_large_frames_without_upscaling(self):
         loader = AvatarLoader("cache", max_frame_height=720)
 
@@ -32,6 +36,7 @@ class RuntimeTests(unittest.TestCase):
             list(runtime.avatar_specs),
             ["chinese", "business_male_1", "chen_yu"],
         )
+        self.assertEqual(PUBLIC_AVATAR_FILES["chinese"], "chinese2-cycle-4to7.mp4")
         for profile_id, filename in PUBLIC_AVATAR_FILES.items():
             self.assertEqual(
                 runtime.avatar_specs[profile_id].video_path,

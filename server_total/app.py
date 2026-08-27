@@ -94,6 +94,7 @@ class AskRequest(BaseModel):
     voice_id: str | None = Field(default=None, min_length=1, max_length=64)
     speaker: str | None = None
     speed: float = Field(default=1.0, gt=0.25, le=3.0)
+    source_time_seconds: float = Field(default=0.0, ge=0.0, le=3600.0)
 
 
 class CancelRequest(BaseModel):
@@ -112,6 +113,7 @@ class SpeakRequest(BaseModel):
     voice_id: str | None = Field(default=None, min_length=1, max_length=64)
     speaker: str | None = None
     speed: float = Field(default=1.0, gt=0.25, le=3.0)
+    source_time_seconds: float = Field(default=0.0, ge=0.0, le=3600.0)
 
 
 @dataclass(frozen=True)
@@ -685,6 +687,7 @@ async def _render_units(
                         "type": "start",
                         "profile": request.profile,
                         "continue_from_previous": timeline.sequence > 0,
+                        "start_position": math.floor(request.source_time_seconds * fps),
                     }
                 )
             )
@@ -790,8 +793,7 @@ async def _render_units(
                 queue_wait_ms,
             )
             active_packet_count += packet_count
-            rendered_frames = math.floor(len(item.pcm) / 2 / 16000 * fps)
-            timeline.pts_offset_us += round(rendered_frames / fps * 1_000_000)
+            timeline.pts_offset_us += round(len(item.pcm) / 2 / 16000 * 1_000_000)
     return rendered
 
 
