@@ -76,6 +76,10 @@ TTS_STREAM_MIN_TAIL_SECONDS = float(
     os.getenv("PIPELINE_TTS_MIN_TAIL_SECONDS", "0.25")
 )
 PLAYBACK_BUFFER_SECONDS = float(os.getenv("PIPELINE_PLAYBACK_BUFFER_SECONDS", "1.5"))
+MEDIA_SEND_AHEAD_SECONDS = max(
+    PLAYBACK_BUFFER_SECONDS,
+    float(os.getenv("PIPELINE_MEDIA_SEND_AHEAD_SECONDS", "2.5")),
+)
 FIRST_UNIT_MIN_CHARS = int(os.getenv("PIPELINE_FIRST_UNIT_MIN_CHARS", "1"))
 TARGET_UNIT_CHARS = int(os.getenv("PIPELINE_TARGET_UNIT_CHARS", "1"))
 COALESCE_HARD_DELIMITERS = os.getenv(
@@ -147,6 +151,22 @@ class MediaTimeline:
 
     pts_offset_us: int = 0
     sequence: int = 0
+
+
+@dataclass
+class MediaSendPacer:
+    """Keep generated media close enough to its real-time presentation clock."""
+
+    max_ahead_seconds: float = MEDIA_SEND_AHEAD_SECONDS
+    started_at: float = field(default_factory=time.perf_counter)
+
+    async def wait_until_sendable(self, pts_us: int) -> None:
+        target = self.started_at + max(
+            0.0, pts_us / 1_000_000 - self.max_ahead_seconds
+        )
+        delay = target - time.perf_counter()
+        if delay > 0:
+            await asyncio.sleep(delay)
 
 
 class FrontendSender:
@@ -665,6 +685,7 @@ async def _render_units(
         fps = await _handshake_upstream(
             upstream, sender, request, request_id
         )
+        media_pacer = MediaSendPacer()
         active_unit: TextUnit | None = None
         active_packet_count = 0
 
@@ -749,11 +770,12 @@ async def _render_units(
                             }
                         )
                         text_unit_sent = True
-                    outgoing, _packet_type, _pts_us = remap_media_packet(
+                    outgoing, _packet_type, outgoing_pts_us = remap_media_packet(
                         message,
                         sequence=timeline.sequence,
                         pts_offset_us=timeline.pts_offset_us,
                     )
+                    await media_pacer.wait_until_sendable(outgoing_pts_us)
                     await sender.send_bytes(outgoing)
                     timeline.sequence += 1
                     packet_count += 1

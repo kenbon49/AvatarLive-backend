@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from server_total.app import (
     AVATAR_CATALOG,
     AskRequest,
+    MediaSendPacer,
     _musetalk_avatar_catalog,
     _render_units,
     app,
@@ -141,6 +142,30 @@ def media_packet(
 
 
 class PipelineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_media_sender_waits_when_pts_exceeds_send_ahead_window(self):
+        pacer = MediaSendPacer(max_ahead_seconds=2.5, started_at=100.0)
+        sleep = AsyncMock()
+
+        with (
+            patch("server_total.app.time.perf_counter", return_value=100.25),
+            patch("server_total.app.asyncio.sleep", sleep),
+        ):
+            await pacer.wait_until_sendable(3_000_000)
+
+        sleep.assert_awaited_once_with(0.25)
+
+    async def test_media_sender_does_not_wait_inside_send_ahead_window(self):
+        pacer = MediaSendPacer(max_ahead_seconds=2.5, started_at=100.0)
+        sleep = AsyncMock()
+
+        with (
+            patch("server_total.app.time.perf_counter", return_value=100.25),
+            patch("server_total.app.asyncio.sleep", sleep),
+        ):
+            await pacer.wait_until_sendable(2_500_000)
+
+        sleep.assert_not_awaited()
+
     async def test_normalizes_melotts_speaker_catalog_for_web_clients(self):
         response = FakeCatalogResponse(
             {
