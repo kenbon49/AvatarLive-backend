@@ -29,7 +29,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 import httpx
 import numpy as np
 from pydantic import BaseModel, Field, ValidationError
@@ -38,7 +38,14 @@ import websockets
 
 from llm_inference import LLMInferenceError, LiteLLMClient
 
-from .protocol import remap_media_packet
+from .prepared_video import (
+    artifact_paths,
+    cache_key as prepared_video_cache_key,
+    encode_transparent_webm,
+    read_manifest as read_prepared_video_manifest,
+    write_manifest as write_prepared_video_manifest,
+)
+from .protocol import PACKET_HEADER, PACKET_MAGIC, PACKET_VERSION, remap_media_packet
 from .segmenter import PunctuationSegmenter, TextUnit
 
 
@@ -80,6 +87,16 @@ TTS_STREAM_MIN_TAIL_SECONDS = float(
 TTS_CACHE_DIR = Path(os.getenv("TTS_CACHE_DIR", "/app/data/tts-cache"))
 TTS_CACHE_VERSION = os.getenv("TTS_CACHE_VERSION", "v1").strip() or "v1"
 TTS_PREPARE_CONCURRENCY = max(1, int(os.getenv("TTS_PREPARE_CONCURRENCY", "2")))
+VIDEO_CACHE_DIR = Path(os.getenv("VIDEO_CACHE_DIR", "/app/data/video-cache"))
+VIDEO_CACHE_VERSION = os.getenv("VIDEO_CACHE_VERSION", "v1").strip() or "v1"
+VIDEO_PREPARE_CONCURRENCY = max(
+    1, int(os.getenv("VIDEO_PREPARE_CONCURRENCY", "1"))
+)
+VIDEO_BACKGROUND_TOLERANCE = float(os.getenv("VIDEO_BACKGROUND_TOLERANCE", "4"))
+VIDEO_BACKGROUND_SOFTNESS = float(os.getenv("VIDEO_BACKGROUND_SOFTNESS", "6"))
+VIDEO_MAX_DURATION_SECONDS = min(
+    120.0, max(1.0, float(os.getenv("VIDEO_MAX_DURATION_SECONDS", "120")))
+)
 PLAYBACK_BUFFER_SECONDS = float(os.getenv("PIPELINE_PLAYBACK_BUFFER_SECONDS", "1.5"))
 MEDIA_SEND_AHEAD_SECONDS = max(
     PLAYBACK_BUFFER_SECONDS,
@@ -92,6 +109,9 @@ COALESCE_HARD_DELIMITERS = os.getenv(
 ).lower() not in {"0", "false", "no"}
 _END = object()
 _tts_cache_locks: dict[str, asyncio.Lock] = {}
+_video_prepare_tasks: dict[str, asyncio.Task[None]] = {}
+_video_prepare_failures: dict[str, str] = {}
+_video_prepare_semaphore = asyncio.Semaphore(VIDEO_PREPARE_CONCURRENCY)
 AvatarProfile = str
 AVATAR_PROFILE_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,95}$"
 DEFAULT_AVATAR_PROFILE: AvatarProfile = "chinese"
@@ -144,6 +164,13 @@ class SpeechPrepareRequest(BaseModel):
     voice_id: str | None = Field(default=None, min_length=1, max_length=64)
     speaker: str | None = None
     speed: float = Field(default=1.0, gt=0.25, le=3.0)
+
+
+class VideoPrepareRequest(SpeechPrepareRequest):
+    profile: AvatarProfile = Field(
+        default=DEFAULT_AVATAR_PROFILE, pattern=AVATAR_PROFILE_PATTERN
+    )
+    source_time_seconds: float = Field(default=0.0, ge=0.0, le=3600.0)
 
 
 @dataclass(frozen=True)
@@ -204,10 +231,13 @@ class FrontendSender:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    try:
-        await asyncio.to_thread(TTS_CACHE_DIR.mkdir, parents=True, exist_ok=True)
-    except OSError:
-        log.warning("TTS cache directory is unavailable", exc_info=True)
+    for cache_directory in (TTS_CACHE_DIR, VIDEO_CACHE_DIR):
+        try:
+            await asyncio.to_thread(
+                cache_directory.mkdir, parents=True, exist_ok=True
+            )
+        except OSError:
+            log.warning("cache directory %s is unavailable", cache_directory, exc_info=True)
     app.state.http = httpx.AsyncClient(timeout=httpx.Timeout(REQUEST_TIMEOUT))
     app.state.llm = LiteLLMClient()
     yield
@@ -283,6 +313,12 @@ async def health() -> dict[str, object]:
         "supports_voice_clone": TTS_SERVICE == "openvoice",
         "default_voice_id": DEFAULT_VOICE_ID,
         "tts_cache_version": TTS_CACHE_VERSION,
+        "prepared_video": {
+            "enabled": True,
+            "cache_version": VIDEO_CACHE_VERSION,
+            "preparing": sum(not task.done() for task in _video_prepare_tasks.values()),
+            "format": "webm-vp9-alpha-opus",
+        },
         "musetalk_ws_url": MUSETALK_WS_URL,
         "musetalk_http_url": MUSETALK_HTTP_URL,
         "musetalk_backend": MUSETALK_BACKEND,
@@ -677,6 +713,263 @@ async def prepare_speech(request: SpeechPrepareRequest) -> dict[str, object]:
         "errors": errors[:5],
         "elapsed_ms": round((time.perf_counter() - started) * 1000),
     }
+
+
+def _video_speech_request(request: VideoPrepareRequest, text: str) -> SpeakRequest:
+    return SpeakRequest(
+        type="speak",
+        text=text,
+        profile=request.profile,
+        language=request.language,
+        voice_id=request.voice_id,
+        speaker=request.speaker,
+        speed=request.speed,
+        source_time_seconds=request.source_time_seconds,
+    )
+
+
+def _prepared_video_key(
+    request: VideoPrepareRequest, text: str, profile_version: str
+) -> str:
+    speech_request = _video_speech_request(request, text)
+    return prepared_video_cache_key(
+        {
+            "video_cache_version": VIDEO_CACHE_VERSION,
+            "musetalk_backend": MUSETALK_BACKEND,
+            "musetalk_inference_dtype": MUSETALK_INFERENCE_DTYPE,
+            "profile": request.profile,
+            "profile_version": profile_version,
+            "source_time_seconds": request.source_time_seconds,
+            "speech_cache_key": _speech_cache_key(speech_request, text),
+            "background_removal": {
+                "algorithm": "edge-connected-color-v1",
+                "tolerance": VIDEO_BACKGROUND_TOLERANCE,
+                "softness": VIDEO_BACKGROUND_SOFTNESS,
+            },
+        }
+    )
+
+
+async def _prepared_video_profile_version(profile: str) -> str:
+    catalog = await _musetalk_avatar_catalog()
+    for item in catalog:
+        if item.get("id") == profile:
+            return str(item.get("version") or "builtin")
+    raise HTTPException(status_code=404, detail=f"unknown or unpublished avatar: {profile}")
+
+
+def _prepared_video_info(index: int, key: str) -> dict[str, object]:
+    manifest = read_prepared_video_manifest(VIDEO_CACHE_DIR, key)
+    if manifest is not None:
+        return {
+            "index": index,
+            "key": key,
+            "status": "ready",
+            "url": f"/v1/videos/{key}.webm",
+            "duration_seconds": manifest.get("duration_seconds"),
+            "width": manifest.get("width"),
+            "height": manifest.get("height"),
+            "fps": manifest.get("fps"),
+            "background_removed": manifest.get("background_removed") is True,
+        }
+    task = _video_prepare_tasks.get(key)
+    if task is not None and not task.done():
+        return {"index": index, "key": key, "status": "preparing"}
+    failure = _video_prepare_failures.get(key)
+    if failure:
+        return {
+            "index": index,
+            "key": key,
+            "status": "failed",
+            "error": failure[:500],
+        }
+    return {"index": index, "key": key, "status": "missing"}
+
+
+def _decode_media_packet(packet: bytes) -> tuple[int, int, bytes]:
+    if len(packet) < PACKET_HEADER.size:
+        raise RuntimeError("MuseTalk returned a truncated media packet")
+    magic, version, packet_type, _flags, _sequence, size, pts_us = (
+        PACKET_HEADER.unpack_from(packet)
+    )
+    payload = packet[PACKET_HEADER.size :]
+    if magic != PACKET_MAGIC or version != PACKET_VERSION or len(payload) != size:
+        raise RuntimeError("MuseTalk returned an invalid media packet")
+    return packet_type, pts_us, payload
+
+
+async def _render_prepared_video_media(
+    request: SpeakRequest, pcm: bytes
+) -> tuple[list[bytes], bytes, float]:
+    frames: list[tuple[int, bytes]] = []
+    audio: list[tuple[int, bytes]] = []
+    async with websockets.connect(
+        MUSETALK_WS_URL,
+        open_timeout=REQUEST_TIMEOUT,
+        close_timeout=5,
+        ping_timeout=None,
+        max_size=None,
+    ) as upstream:
+        initial_raw = await asyncio.wait_for(upstream.recv(), timeout=REQUEST_TIMEOUT)
+        if not isinstance(initial_raw, str):
+            raise RuntimeError("MuseTalk did not send its readiness event")
+        initial = json.loads(initial_raw)
+        if initial.get("type") != "ready":
+            raise RuntimeError(initial.get("message", "MuseTalk is not ready"))
+        if str(initial.get("backend", "")).lower() != MUSETALK_BACKEND:
+            raise RuntimeError("MuseTalk backend does not match the video cache")
+        if str(initial.get("inference_dtype", "")).lower() != MUSETALK_INFERENCE_DTYPE:
+            raise RuntimeError("MuseTalk dtype does not match the video cache")
+        fps = float(initial.get("fps", 0))
+        if fps <= 0:
+            raise RuntimeError("MuseTalk returned an invalid frame rate")
+
+        await upstream.send(
+            json.dumps(
+                {
+                    "type": "start",
+                    "profile": request.profile,
+                    "continue_from_previous": False,
+                    "start_position": math.floor(request.source_time_seconds * fps),
+                }
+            )
+        )
+        for offset in range(0, len(pcm), PCM_CHUNK_BYTES):
+            await upstream.send(pcm[offset : offset + PCM_CHUNK_BYTES])
+        await upstream.send(json.dumps({"type": "commit"}))
+
+        while True:
+            message = await asyncio.wait_for(upstream.recv(), timeout=REQUEST_TIMEOUT)
+            if isinstance(message, bytes):
+                packet_type, pts_us, payload = _decode_media_packet(message)
+                if packet_type == 1:
+                    frames.append((pts_us, payload))
+                elif packet_type == 2:
+                    audio.append((pts_us, payload))
+                continue
+            control = json.loads(message)
+            if control.get("type") == "error":
+                raise RuntimeError(control.get("message", "MuseTalk stream failed"))
+            if control.get("type") == "stream_end":
+                break
+
+    if not frames or not audio:
+        raise RuntimeError("MuseTalk returned incomplete prepared video media")
+    frames.sort(key=lambda item: item[0])
+    audio.sort(key=lambda item: item[0])
+    return [payload for _pts, payload in frames], b"".join(
+        payload for _pts, payload in audio
+    ), fps
+
+
+async def _generate_prepared_video(
+    key: str, request: VideoPrepareRequest, text: str
+) -> None:
+    async with _video_prepare_semaphore:
+        speech_request = _video_speech_request(request, text)
+        pcm_parts: list[bytes] = []
+        for unit in _segment_speech_text(text):
+            pcm, _duration, _cached = await get_or_synthesize_speech(
+                app, speech_request, unit.text
+            )
+            pcm_parts.append(pcm)
+        pcm = b"".join(pcm_parts)
+        if not pcm:
+            raise RuntimeError("prepared video speech is empty")
+        if len(pcm) / 32000.0 > VIDEO_MAX_DURATION_SECONDS:
+            raise RuntimeError(
+                f"prepared video exceeds {VIDEO_MAX_DURATION_SECONDS:g} seconds"
+            )
+        frames, rendered_pcm, fps = await _render_prepared_video_media(
+            speech_request, pcm
+        )
+        video_path, _manifest_path = artifact_paths(VIDEO_CACHE_DIR, key)
+        metadata = await asyncio.to_thread(
+            encode_transparent_webm,
+            frames,
+            rendered_pcm,
+            fps,
+            video_path,
+            tolerance=VIDEO_BACKGROUND_TOLERANCE,
+            softness=VIDEO_BACKGROUND_SOFTNESS,
+        )
+        await asyncio.to_thread(
+            write_prepared_video_manifest,
+            VIDEO_CACHE_DIR,
+            key,
+            metadata,
+        )
+
+
+def _schedule_prepared_video(
+    key: str, request: VideoPrepareRequest, text: str
+) -> None:
+    current = _video_prepare_tasks.get(key)
+    if current is not None and not current.done():
+        return
+    _video_prepare_failures.pop(key, None)
+    task = asyncio.create_task(_generate_prepared_video(key, request, text))
+    _video_prepare_tasks[key] = task
+
+    def finish(completed: asyncio.Task[None]) -> None:
+        if _video_prepare_tasks.get(key) is completed:
+            _video_prepare_tasks.pop(key, None)
+        try:
+            completed.result()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            _video_prepare_failures[key] = str(exc)
+            log.exception("prepared video generation failed key=%s", key)
+
+    task.add_done_callback(finish)
+
+
+async def _prepared_video_items(
+    request: VideoPrepareRequest, *, schedule_missing: bool
+) -> list[dict[str, object]]:
+    profile_version = await _prepared_video_profile_version(request.profile)
+    items: list[dict[str, object]] = []
+    for index, raw_text in enumerate(request.texts):
+        text = raw_text.strip()
+        key = _prepared_video_key(request, text, profile_version)
+        info = await asyncio.to_thread(_prepared_video_info, index, key)
+        if schedule_missing and info["status"] in {"missing", "failed"}:
+            _schedule_prepared_video(key, request, text)
+            info = {"index": index, "key": key, "status": "preparing"}
+        items.append(info)
+    return items
+
+
+@app.post("/v1/videos/prepare", status_code=202)
+async def prepare_videos(request: VideoPrepareRequest) -> dict[str, object]:
+    items = await _prepared_video_items(request, schedule_missing=True)
+    return {"items": items}
+
+
+@app.post("/v1/videos/lookup")
+async def lookup_videos(request: VideoPrepareRequest) -> dict[str, object]:
+    items = await _prepared_video_items(request, schedule_missing=False)
+    return {"items": items}
+
+
+@app.get("/v1/videos/{key}.webm")
+async def prepared_video(key: str) -> FileResponse:
+    if not re.fullmatch(r"[a-f0-9]{64}", key):
+        raise HTTPException(status_code=400, detail="invalid prepared video key")
+    manifest = await asyncio.to_thread(
+        read_prepared_video_manifest, VIDEO_CACHE_DIR, key
+    )
+    video_path, _manifest_path = artifact_paths(VIDEO_CACHE_DIR, key)
+    if manifest is None:
+        raise HTTPException(status_code=404, detail="prepared video not found")
+    return FileResponse(
+        video_path,
+        media_type="video/webm",
+        filename=f"{key}.webm",
+        content_disposition_type="inline",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 def _next_or_end(iterator: Any) -> Any:

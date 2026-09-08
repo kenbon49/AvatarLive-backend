@@ -6,4 +6,6 @@ pydantic>=2.7,<3
 websockets>=12,<16
 numpy>=1.24,<3
 scipy>=1.10,<2
+pillow>=10,<13
+imageio-ffmpeg>=0.6,<1
 python-multipart>=0.0.9,<1

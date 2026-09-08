@@ -118,6 +118,7 @@ services:
       - "8085:8080"
     volumes:
       - server-total-tts-cache:/app/data/tts-cache
+      - server-total-video-cache:/app/data/video-cache
     environment:
       PYTHONUNBUFFERED: "1"
       LITELLM_BASE_URL: ${LITELLM_LLM_BASE_URL:-http://ollama:11434/v1}
@@ -131,6 +132,11 @@ services:
       TTS_CACHE_DIR: /app/data/tts-cache
       TTS_CACHE_VERSION: ${TTS_CACHE_VERSION:-v1}
       TTS_PREPARE_CONCURRENCY: "${TTS_PREPARE_CONCURRENCY:-2}"
+      VIDEO_CACHE_DIR: /app/data/video-cache
+      VIDEO_CACHE_VERSION: ${VIDEO_CACHE_VERSION:-v1}
+      VIDEO_PREPARE_CONCURRENCY: "${VIDEO_PREPARE_CONCURRENCY:-1}"
+      VIDEO_BACKGROUND_TOLERANCE: "${VIDEO_BACKGROUND_TOLERANCE:-4}"
+      VIDEO_BACKGROUND_SOFTNESS: "${VIDEO_BACKGROUND_SOFTNESS:-6}"
       MUSETALK_WS_URL: ws://musetalk:8083/v1/stream
       MUSETALK_HTTP_URL: http://musetalk:8083
       PIPELINE_REQUEST_TIMEOUT: "300"
@@ -153,3 +159,4 @@ volumes:
     external: true
     name: ${OLLAMA_VOLUME_NAME:-ollama}
   server-total-tts-cache:
+  server-total-video-cache:

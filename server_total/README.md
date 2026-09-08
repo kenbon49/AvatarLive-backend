@@ -38,6 +38,9 @@ GET  http://localhost:8080/v1/avatars
 GET  http://localhost:8080/v1/voices
 POST http://localhost:8080/v1/voices/clone
 POST http://localhost:8080/v1/speech/prepare
+POST http://localhost:8080/v1/videos/prepare
+POST http://localhost:8080/v1/videos/lookup
+GET  http://localhost:8080/v1/videos/{cache_key}.webm
 WS   ws://localhost:8080/v1/conversation
 ```
 
@@ -96,6 +99,12 @@ curl -X POST http://localhost:8080/v1/speech/prepare \
 
 预热和实际播放使用相同的标点分段规则。预热部分失败时响应中的 `failed` 会增加，
 但不会阻断后续播放；播放仍会现场调用 TTS。`tts_result.cached` 可用于确认本段是否命中。
+
+固定话术还可以提交到 `/v1/videos/prepare`。接口立即返回 `preparing`，后台串行使用
+MuseTalk 生成口型视频，并将源素材四周连通的浅色背景移除，编码为带 Alpha 通道的
+VP9 WebM 和 Opus 音频。使用 `/v1/videos/lookup` 轮询状态，`ready` 条目中的 `url`
+可以直接播放。缓存键包含文本、音色、语速、形象版本、推理后端和抠图算法版本；缓存
+未完成或失败时，前端应继续使用实时 MuseTalk 流。
 
 连接本身不会触发 MuseTalk 推理。前端在未提问和回答播放完毕后显示所选源视频的首帧，
 只有发送 `ask` 或 `speak` 后才会把真实语音提交给 MuseTalk 并接收流式媒体。服务不接受
