@@ -116,6 +116,8 @@ services:
     image: avatarlive-backend-server-total:local
     ports:
       - "8085:8080"
+    volumes:
+      - server-total-tts-cache:/app/data/tts-cache
     environment:
       PYTHONUNBUFFERED: "1"
       LITELLM_BASE_URL: ${LITELLM_LLM_BASE_URL:-http://ollama:11434/v1}
@@ -126,6 +128,9 @@ services:
       TTS_SERVICE: ${TTS_SERVICE:-melotts}
       TTS_URL: http://tts:8084
       TTS_DEFAULT_VOICE: ${TTS_DEFAULT_VOICE:-default}
+      TTS_CACHE_DIR: /app/data/tts-cache
+      TTS_CACHE_VERSION: ${TTS_CACHE_VERSION:-v1}
+      TTS_PREPARE_CONCURRENCY: "${TTS_PREPARE_CONCURRENCY:-2}"
       MUSETALK_WS_URL: ws://musetalk:8083/v1/stream
       MUSETALK_HTTP_URL: http://musetalk:8083
       PIPELINE_REQUEST_TIMEOUT: "300"
@@ -147,3 +152,4 @@ volumes:
   ollama-models:
     external: true
     name: ${OLLAMA_VOLUME_NAME:-ollama}
+  server-total-tts-cache:

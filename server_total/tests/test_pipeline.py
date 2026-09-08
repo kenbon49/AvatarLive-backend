@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -16,11 +18,15 @@ from server_total.app import (
     AVATAR_CATALOG,
     AskRequest,
     MediaSendPacer,
+    SpeechPrepareRequest,
+    SpeakRequest,
     _musetalk_avatar_catalog,
     _render_units,
     app,
     avatars,
     conversation,
+    get_or_synthesize_speech,
+    prepare_speech,
     run_pipeline,
     stream_speech_chunks,
     synthesize_speech,
@@ -319,6 +325,66 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(http.request[1]["data"]["tts_text"], "简短回答")
         self.assertEqual(http.request[1]["data"]["output_sample_rate"], 16000)
 
+    async def test_speech_cache_reuses_pcm_and_separates_speed_and_voice(self):
+        pcm = bytes(3200)
+        synthesize = AsyncMock(return_value=(pcm, 0.1))
+        base = SpeakRequest(type="speak", text="缓存测试。", voice_id="voice-a")
+        faster = base.model_copy(update={"speed": 1.2})
+        another_voice = base.model_copy(update={"voice_id": "voice-b"})
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("server_total.app.TTS_CACHE_DIR", Path(directory)),
+            patch("server_total.app.synthesize_speech", synthesize),
+        ):
+            first = await get_or_synthesize_speech(app, base, base.text)
+            second = await get_or_synthesize_speech(app, base, base.text)
+            await get_or_synthesize_speech(app, faster, faster.text)
+            await get_or_synthesize_speech(app, another_voice, another_voice.text)
+
+        self.assertFalse(first[2])
+        self.assertTrue(second[2])
+        self.assertEqual(first[:2], second[:2])
+        self.assertEqual(synthesize.await_count, 3)
+
+    async def test_speech_cache_write_failure_falls_back_to_live_audio(self):
+        request = SpeakRequest(type="speak", text="继续播放。")
+        pcm = bytes(3200)
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("server_total.app.TTS_CACHE_DIR", Path(directory)),
+            patch(
+                "server_total.app.synthesize_speech",
+                AsyncMock(return_value=(pcm, 0.1)),
+            ),
+            patch(
+                "server_total.app._write_cached_pcm",
+                side_effect=OSError("read only"),
+            ),
+        ):
+            result = await get_or_synthesize_speech(app, request, request.text)
+
+        self.assertEqual(result, (pcm, 0.1, False))
+
+    async def test_prepare_speech_uses_playback_segmentation_and_reports_hits(self):
+        prepare = AsyncMock(
+            side_effect=[(bytes(3200), 0.1, False), (bytes(3200), 0.1, True)]
+        )
+        request = SpeechPrepareRequest(texts=["第一句。第二句。", "第一句。"])
+
+        with patch("server_total.app.get_or_synthesize_speech", prepare):
+            result = await prepare_speech(request)
+
+        self.assertEqual(result["requested_texts"], 2)
+        self.assertEqual(result["units"], 2)
+        self.assertEqual(result["generated"], 1)
+        self.assertEqual(result["cache_hits"], 1)
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(
+            {call.args[2] for call in prepare.await_args_list},
+            {"第一句。", "第二句。"},
+        )
+
     async def test_streaming_uses_a_short_first_chunk_then_larger_chunks(self):
         class ChunkedResponse(FakeHttpResponse):
             content = bytes(56_000)
@@ -435,6 +501,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         app_module.app.state.llm = FakeLLM()
         try:
             with (
+                tempfile.TemporaryDirectory() as directory,
+                patch("server_total.app.TTS_CACHE_DIR", Path(directory)),
                 patch("server_total.app.stream_speech_chunks", synthesize_stream),
                 patch("server_total.app.websockets.connect", return_value=upstream),
             ):
@@ -514,6 +582,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 yield bytes(3200), 0.1
 
             with (
+                tempfile.TemporaryDirectory() as directory,
+                patch("server_total.app.TTS_CACHE_DIR", Path(directory)),
                 patch(
                     "server_total.app.stream_speech_chunks",
                     synthesize_stream,

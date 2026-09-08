@@ -37,6 +37,7 @@ GET  http://localhost:8080/health
 GET  http://localhost:8080/v1/avatars
 GET  http://localhost:8080/v1/voices
 POST http://localhost:8080/v1/voices/clone
+POST http://localhost:8080/v1/speech/prepare
 WS   ws://localhost:8080/v1/conversation
 ```
 
@@ -82,6 +83,19 @@ curl -F "name=我的音色" -F "audio=@reference.wav" http://localhost:8080/v1/v
 ```json
 {"type":"cancel","request_id":"对应的请求ID"}
 ```
+
+固定话术可以在开播前批量预生成 16 kHz PCM。服务使用文本、语言、音色、语速、
+TTS 服务和 `TTS_CACHE_VERSION` 共同生成缓存键；`docker-compose.local.yml` 将缓存保存
+在独立 volume 中，重建服务后仍可复用：
+
+```bash
+curl -X POST http://localhost:8080/v1/speech/prepare \
+  -H 'Content-Type: application/json' \
+  -d '{"texts":["欢迎来到直播间。"],"language":"ZH","voice_id":"default","speed":1.0}'
+```
+
+预热和实际播放使用相同的标点分段规则。预热部分失败时响应中的 `failed` 会增加，
+但不会阻断后续播放；播放仍会现场调用 TTS。`tts_result.cached` 可用于确认本段是否命中。
 
 连接本身不会触发 MuseTalk 推理。前端在未提问和回答播放完毕后显示所选源视频的首帧，
 只有发送 `ask` 或 `speak` 后才会把真实语音提交给 MuseTalk 并接收流式媒体。服务不接受

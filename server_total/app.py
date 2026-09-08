@@ -5,14 +5,16 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+import hashlib
 import io
 import json
 import logging
 import math
 import os
+from pathlib import Path
 import re
 import time
-from typing import Any, AsyncIterator, Literal
+from typing import Annotated, Any, AsyncIterator, Literal
 from urllib.parse import quote
 from uuid import uuid4
 import wave
@@ -75,6 +77,9 @@ TTS_STREAM_STEADY_CHUNK_SECONDS = float(
 TTS_STREAM_MIN_TAIL_SECONDS = float(
     os.getenv("PIPELINE_TTS_MIN_TAIL_SECONDS", "0.25")
 )
+TTS_CACHE_DIR = Path(os.getenv("TTS_CACHE_DIR", "/app/data/tts-cache"))
+TTS_CACHE_VERSION = os.getenv("TTS_CACHE_VERSION", "v1").strip() or "v1"
+TTS_PREPARE_CONCURRENCY = max(1, int(os.getenv("TTS_PREPARE_CONCURRENCY", "2")))
 PLAYBACK_BUFFER_SECONDS = float(os.getenv("PIPELINE_PLAYBACK_BUFFER_SECONDS", "1.5"))
 MEDIA_SEND_AHEAD_SECONDS = max(
     PLAYBACK_BUFFER_SECONDS,
@@ -86,6 +91,7 @@ COALESCE_HARD_DELIMITERS = os.getenv(
     "PIPELINE_COALESCE_HARD_DELIMITERS", "0"
 ).lower() not in {"0", "false", "no"}
 _END = object()
+_tts_cache_locks: dict[str, asyncio.Lock] = {}
 AvatarProfile = str
 AVATAR_PROFILE_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,95}$"
 DEFAULT_AVATAR_PROFILE: AvatarProfile = "chinese"
@@ -127,6 +133,17 @@ class SpeakRequest(BaseModel):
     speaker: str | None = None
     speed: float = Field(default=1.0, gt=0.25, le=3.0)
     source_time_seconds: float = Field(default=0.0, ge=0.0, le=3600.0)
+
+
+SpeechText = Annotated[str, Field(min_length=1, max_length=2000)]
+
+
+class SpeechPrepareRequest(BaseModel):
+    texts: list[SpeechText] = Field(min_length=1, max_length=50)
+    language: Literal["ZH", "EN"] = "ZH"
+    voice_id: str | None = Field(default=None, min_length=1, max_length=64)
+    speaker: str | None = None
+    speed: float = Field(default=1.0, gt=0.25, le=3.0)
 
 
 @dataclass(frozen=True)
@@ -187,6 +204,10 @@ class FrontendSender:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    try:
+        await asyncio.to_thread(TTS_CACHE_DIR.mkdir, parents=True, exist_ok=True)
+    except OSError:
+        log.warning("TTS cache directory is unavailable", exc_info=True)
     app.state.http = httpx.AsyncClient(timeout=httpx.Timeout(REQUEST_TIMEOUT))
     app.state.llm = LiteLLMClient()
     yield
@@ -261,6 +282,7 @@ async def health() -> dict[str, object]:
         "tts_url": TTS_URL,
         "supports_voice_clone": TTS_SERVICE == "openvoice",
         "default_voice_id": DEFAULT_VOICE_ID,
+        "tts_cache_version": TTS_CACHE_VERSION,
         "musetalk_ws_url": MUSETALK_WS_URL,
         "musetalk_http_url": MUSETALK_HTTP_URL,
         "musetalk_backend": MUSETALK_BACKEND,
@@ -501,6 +523,162 @@ async def synthesize_speech(
     return b"".join(chunks), duration
 
 
+def _effective_voice_id(request: AskRequest | SpeakRequest) -> str:
+    voice_id = request.voice_id or request.speaker or DEFAULT_VOICE_ID
+    return DEFAULT_VOICE_ID if voice_id in LEGACY_VOICE_IDS else voice_id
+
+
+def _speech_cache_key(request: AskRequest | SpeakRequest, text: str) -> str:
+    identity = json.dumps(
+        {
+            "cache_version": TTS_CACHE_VERSION,
+            "language": request.language.lower(),
+            "sample_rate": 16000,
+            "service": TTS_SERVICE,
+            "speed": request.speed,
+            "text": text,
+            "voice_id": _effective_voice_id(request),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def _speech_cache_path(request: AskRequest | SpeakRequest, text: str) -> Path:
+    key = _speech_cache_key(request, text)
+    return TTS_CACHE_DIR / key[:2] / f"{key}.pcm"
+
+
+def _read_cached_pcm(path: Path) -> bytes | None:
+    try:
+        pcm = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        log.warning("failed to read TTS cache entry %s", path, exc_info=True)
+        return None
+    if pcm and len(pcm) % 2 == 0:
+        return pcm
+    log.warning("ignoring invalid TTS cache entry %s", path)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        log.warning("failed to remove invalid TTS cache entry %s", path, exc_info=True)
+    return None
+
+
+def _write_cached_pcm(path: Path, pcm: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        temporary.write_bytes(pcm)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+async def _load_cached_speech(
+    request: AskRequest | SpeakRequest, text: str
+) -> tuple[bytes, float] | None:
+    pcm = await asyncio.to_thread(_read_cached_pcm, _speech_cache_path(request, text))
+    if pcm is None:
+        return None
+    return pcm, len(pcm) / 32000.0
+
+
+async def _store_cached_speech(
+    request: AskRequest | SpeakRequest, text: str, pcm: bytes
+) -> None:
+    try:
+        await asyncio.to_thread(
+            _write_cached_pcm, _speech_cache_path(request, text), pcm
+        )
+    except OSError:
+        # Cache persistence is an optimization; it must never be required for
+        # live speech to continue.
+        log.warning("failed to persist synthesized speech", exc_info=True)
+
+
+async def get_or_synthesize_speech(
+    app_: FastAPI, request: AskRequest | SpeakRequest, text: str
+) -> tuple[bytes, float, bool]:
+    cached = await _load_cached_speech(request, text)
+    if cached is not None:
+        return cached[0], cached[1], True
+
+    cache_key = _speech_cache_key(request, text)
+    lock = _tts_cache_locks.setdefault(cache_key, asyncio.Lock())
+    try:
+        async with lock:
+            cached = await _load_cached_speech(request, text)
+            if cached is not None:
+                return cached[0], cached[1], True
+            pcm, duration = await synthesize_speech(app_, request, text)
+            await _store_cached_speech(request, text, pcm)
+            return pcm, duration, False
+    finally:
+        if _tts_cache_locks.get(cache_key) is lock:
+            _tts_cache_locks.pop(cache_key, None)
+
+
+def _segment_speech_text(text: str) -> list[TextUnit]:
+    segmenter = PunctuationSegmenter(
+        first_unit_min_chars=FIRST_UNIT_MIN_CHARS,
+        target_unit_chars=TARGET_UNIT_CHARS,
+        coalesce_hard_delimiters=COALESCE_HARD_DELIMITERS,
+    )
+    return [*segmenter.feed(text), *segmenter.finish()]
+
+
+@app.post("/v1/speech/prepare")
+async def prepare_speech(request: SpeechPrepareRequest) -> dict[str, object]:
+    started = time.perf_counter()
+    speech_request = SpeakRequest(
+        type="speak",
+        text="prepare",
+        language=request.language,
+        voice_id=request.voice_id,
+        speaker=request.speaker,
+        speed=request.speed,
+    )
+    units: list[str] = []
+    seen: set[str] = set()
+    for text in request.texts:
+        for unit in _segment_speech_text(text.strip()):
+            if unit.text not in seen:
+                seen.add(unit.text)
+                units.append(unit.text)
+
+    semaphore = asyncio.Semaphore(TTS_PREPARE_CONCURRENCY)
+
+    async def prepare_unit(text: str) -> tuple[bool | None, str | None]:
+        try:
+            async with semaphore:
+                _pcm, _duration, cached = await get_or_synthesize_speech(
+                    app, speech_request, text
+                )
+            return cached, None
+        except Exception as exc:
+            log.exception("failed to prepare TTS cache for %r", text)
+            return None, str(exc)
+
+    results = await asyncio.gather(*(prepare_unit(text) for text in units))
+    hits = sum(cached is True for cached, _error in results)
+    generated = sum(cached is False for cached, _error in results)
+    errors = [error for _cached, error in results if error]
+    return {
+        "requested_texts": len(request.texts),
+        "units": len(units),
+        "cache_hits": hits,
+        "generated": generated,
+        "failed": len(errors),
+        "errors": errors[:5],
+        "elapsed_ms": round((time.perf_counter() - started) * 1000),
+    }
+
+
 def _next_or_end(iterator: Any) -> Any:
     try:
         return next(iterator)
@@ -516,19 +694,12 @@ async def _produce_text_units(
     *,
     kind: Literal["ask", "speak"] = "ask",
 ) -> str:
-    segmenter = PunctuationSegmenter(
-        first_unit_min_chars=FIRST_UNIT_MIN_CHARS,
-        target_unit_chars=TARGET_UNIT_CHARS,
-        coalesce_hard_delimiters=COALESCE_HARD_DELIMITERS,
-    )
     answer_parts: list[str] = []
 
     if kind == "speak":
         await sender.send_json({"type": "speak_start", "request_id": request_id})
         answer = request.text.strip()
-        for unit in segmenter.feed(answer):
-            await queue.put(unit)
-        for unit in segmenter.finish():
+        for unit in _segment_speech_text(answer):
             await queue.put(unit)
         await sender.send_json(
             {"type": "speak_result", "request_id": request_id, "text": answer}
@@ -536,6 +707,11 @@ async def _produce_text_units(
         await queue.put(_END)
         return answer
 
+    segmenter = PunctuationSegmenter(
+        first_unit_min_chars=FIRST_UNIT_MIN_CHARS,
+        target_unit_chars=TARGET_UNIT_CHARS,
+        coalesce_hard_delimiters=COALESCE_HARD_DELIMITERS,
+    )
     iterator = app.state.llm.stream_answer_text(request.question)
     while True:
         delta = await asyncio.to_thread(_next_or_end, iterator)
@@ -582,29 +758,44 @@ async def _synthesize_units(
         )
         duration = 0.0
         chunks = 0
+        cached = False
         if TTS_SERVICE == "melotts":
-            pcm, chunk_duration = await synthesize_speech(app, request, item.text)
+            pcm, chunk_duration, cached = await get_or_synthesize_speech(
+                app, request, item.text
+            )
             await audio_queue.put(
                 AudioUnit(item, pcm, chunk_duration, chunk_index=0)
             )
             duration += chunk_duration
             chunks = 1
         else:
-            async for pcm, chunk_duration in stream_speech_chunks(
-                app,
-                request,
-                item.text,
-                first_chunk_seconds=(
-                    TTS_STREAM_CHUNK_SECONDS
-                    if count == 0
-                    else TTS_STREAM_STEADY_CHUNK_SECONDS
-                ),
-            ):
+            cached_audio = await _load_cached_speech(request, item.text)
+            cached = cached_audio is not None
+            streamed_pcm: list[bytes] = []
+            if cached_audio is not None:
+                pcm, chunk_duration = cached_audio
                 await audio_queue.put(
-                    AudioUnit(item, pcm, chunk_duration, chunk_index=chunks)
+                    AudioUnit(item, pcm, chunk_duration, chunk_index=0)
                 )
-                duration += chunk_duration
-                chunks += 1
+                duration = chunk_duration
+                chunks = 1
+            else:
+                async for pcm, chunk_duration in stream_speech_chunks(
+                    app,
+                    request,
+                    item.text,
+                    first_chunk_seconds=(
+                        TTS_STREAM_CHUNK_SECONDS
+                        if count == 0
+                        else TTS_STREAM_STEADY_CHUNK_SECONDS
+                    ),
+                ):
+                    streamed_pcm.append(pcm)
+                    await audio_queue.put(AudioUnit(item, pcm, chunk_duration, chunks))
+                    duration += chunk_duration
+                    chunks += 1
+            if streamed_pcm:
+                await _store_cached_speech(request, item.text, b"".join(streamed_pcm))
         if chunks == 0:
             raise RuntimeError(f"{TTS_SERVICE} returned empty PCM audio")
         elapsed_ms = round((time.perf_counter() - started) * 1000)
@@ -617,6 +808,7 @@ async def _synthesize_units(
                 "duration_seconds": round(duration, 3),
                 "elapsed_ms": elapsed_ms,
                 "chunks": chunks,
+                "cached": cached,
             }
         )
         await audio_queue.put(AudioUnitEnd(item, duration, chunks))
