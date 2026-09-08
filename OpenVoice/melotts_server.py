@@ -20,6 +20,7 @@ from melo import TTS
 
 DEVICE = os.getenv("MELOTTS_DEVICE", "auto")
 DEFAULT_VOICE_ID = os.getenv("TTS_DEFAULT_VOICE", "default")
+WARMUP_TEXT = os.getenv("MELOTTS_WARMUP_TEXT", "你好，欢迎使用实时语音。").strip()
 SUPPORTED_LANGUAGES = {
     "zh": ("ZH", "ZH"),
     "en": ("EN", "EN-Default"),
@@ -39,9 +40,21 @@ class MeloTTSEngine:
 
     def __init__(self, device: str = DEVICE) -> None:
         self.device = resolve_device(device)
+        self.gpu_name: str | None = None
+        self.tf32_enabled = False
+        if self.device.startswith("cuda"):
+            self.gpu_name = torch.cuda.get_device_name(torch.device(self.device))
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            torch.set_float32_matmul_precision("high")
+            self.tf32_enabled = True
         self._lock = threading.Lock()
         self._models: dict[str, TTS] = {}
         self._models["zh"] = self._load_model("zh")
+        self.warmup_completed = False
+        if WARMUP_TEXT:
+            self.synthesize(WARMUP_TEXT, "zh", 1.0, 16000)
+            self.warmup_completed = True
 
     def _load_model(self, language: str) -> TTS:
         model_language, _speaker = SUPPORTED_LANGUAGES[language]
@@ -119,6 +132,9 @@ async def health() -> dict[str, Any]:
         "service": "melotts",
         "model": "MeloTTS",
         "device": engine.device,
+        "gpu_name": engine.gpu_name,
+        "tf32_enabled": engine.tf32_enabled,
+        "warmup_completed": engine.warmup_completed,
         "default_voice_id": DEFAULT_VOICE_ID,
         "loaded_languages": sorted(engine._models),
     }

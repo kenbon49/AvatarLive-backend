@@ -50,6 +50,7 @@ class TTS(nn.Module):
         checkpoint = torch.load(ckpt_path, map_location=self.device, weights_only=False)
         model.load_state_dict(checkpoint["model"], strict=True)
         model.eval()
+        model.dec.remove_weight_norm()
 
         self.model = model
         self.hps = hps

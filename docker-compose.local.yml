@@ -62,6 +62,7 @@ services:
       TTS_SERVICE: ${TTS_SERVICE:-melotts}
       TTS_DEFAULT_VOICE: ${TTS_DEFAULT_VOICE:-default}
       MELOTTS_DEVICE: ${MELOTTS_DEVICE:-cuda:0}
+      MELOTTS_WARMUP_TEXT: ${MELOTTS_WARMUP_TEXT:-你好，欢迎使用实时语音。}
       OPENVOICE_DEVICE: cuda:0
       OPENVOICE_DEFAULT_VOICE: default
       OPENVOICE_DEFAULT_REFERENCE: /app/data/input/audio/yongen.wav
@@ -78,7 +79,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["0"]
+              device_ids: ["${MELOTTS_GPU_ID:-1}"]
               capabilities: [gpu]
 
   ollama:

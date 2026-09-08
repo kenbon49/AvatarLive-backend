@@ -27,10 +27,10 @@ def get_text_for_tts_infer(text, language, hps, device, symbol_to_id):
             f"BERT length {feature.shape[-1]} does not match phone length {len(phones)}"
         )
     if language == "ZH_MIX_EN":
-        bert = torch.zeros(1024, len(phones))
+        bert = torch.zeros(1024, len(phones), device=device)
         ja_bert = feature
     else:
-        bert = torch.zeros(1024, len(phones))
+        bert = torch.zeros(1024, len(phones), device=device)
         ja_bert = feature
 
     return (

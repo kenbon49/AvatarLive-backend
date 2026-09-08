@@ -29,7 +29,7 @@ def get_bert_feature(text, word2ph, device=None):
         inputs = tokenizer(text, return_tensors="pt")
         inputs = {key: value.to(bert_model.device) for key, value in inputs.items()}
         result = bert_model(**inputs, output_hidden_states=True)
-        features = result.hidden_states[-3][0].cpu()
+        features = result.hidden_states[-3][0]
 
     if inputs["input_ids"].shape[-1] != len(word2ph):
         raise RuntimeError("English tokenizer length does not match word-to-phone mapping")
