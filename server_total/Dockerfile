@@ -5,7 +5,11 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl \
+RUN sed -i \
+        -e 's|http://deb.debian.org/debian-security|https://mirrors.aliyun.com/debian-security|g' \
+        -e 's|http://deb.debian.org/debian|https://mirrors.aliyun.com/debian|g' \
+        /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY server_total/requirements.txt /app/server_total/requirements.txt

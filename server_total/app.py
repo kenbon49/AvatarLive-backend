@@ -41,8 +41,17 @@ from .segmenter import PunctuationSegmenter, TextUnit
 
 
 log = logging.getLogger("server-total")
-OPENVOICE_URL = os.getenv("OPENVOICE_URL", "http://localhost:8084").rstrip("/")
-DEFAULT_VOICE_ID = os.getenv("OPENVOICE_DEFAULT_VOICE", "default")
+TTS_SERVICE = os.getenv("TTS_SERVICE", "melotts").strip().lower()
+if TTS_SERVICE not in {"melotts", "openvoice"}:
+    raise RuntimeError(f"unsupported TTS_SERVICE: {TTS_SERVICE}")
+TTS_URL = os.getenv(
+    "TTS_URL",
+    os.getenv("OPENVOICE_URL", "http://localhost:8084"),
+).rstrip("/")
+DEFAULT_VOICE_ID = os.getenv(
+    "TTS_DEFAULT_VOICE",
+    os.getenv("OPENVOICE_DEFAULT_VOICE", "default"),
+)
 LEGACY_VOICE_IDS = frozenset(
     {
         "default_female",
@@ -228,8 +237,9 @@ async def health() -> dict[str, object]:
             "api_key_configured": bool(llm.api_key),
             "streaming": True,
         },
-        "tts_service": "openvoice",
-        "openvoice_url": OPENVOICE_URL,
+        "tts_service": TTS_SERVICE,
+        "tts_url": TTS_URL,
+        "supports_voice_clone": TTS_SERVICE == "openvoice",
         "default_voice_id": DEFAULT_VOICE_ID,
         "musetalk_ws_url": MUSETALK_WS_URL,
         "musetalk_http_url": MUSETALK_HTTP_URL,
@@ -253,12 +263,12 @@ async def avatars() -> dict[str, object]:
 @app.get("/v1/voices")
 async def voices() -> dict[str, object]:
     try:
-        response = await app.state.http.get(f"{OPENVOICE_URL}/v1/speakers")
+        response = await app.state.http.get(f"{TTS_URL}/v1/speakers")
         response.raise_for_status()
         payload = response.json()
         speakers = payload.get("speakers", [])
         if not isinstance(speakers, list):
-            raise ValueError("OpenVoice returned an invalid speaker catalog")
+            raise ValueError(f"{TTS_SERVICE} returned an invalid speaker catalog")
         catalog = []
         for speaker in speakers:
             if not isinstance(speaker, dict) or not isinstance(speaker.get("id"), str):
@@ -269,7 +279,7 @@ async def voices() -> dict[str, object]:
                     "name": speaker.get("name") or speaker["id"],
                     "kind": "preset" if speaker.get("default") is True else "clone",
                     "source": {
-                        "provider": "OpenVoice",
+                        "provider": "MeloTTS" if TTS_SERVICE == "melotts" else "OpenVoice",
                         "sample_url": (
                             f"/v1/voices/{quote(speaker['id'], safe='')}/preview"
                         ),
@@ -285,7 +295,7 @@ async def voices() -> dict[str, object]:
         }
     except (AttributeError, TypeError, ValueError, httpx.HTTPError) as exc:
         raise HTTPException(
-            status_code=502, detail=f"OpenVoice is unavailable: {exc}"
+            status_code=502, detail=f"{TTS_SERVICE} is unavailable: {exc}"
         ) from exc
 
 
@@ -294,6 +304,11 @@ async def create_cloned_voice(
     name: str = Form(..., min_length=1, max_length=80),
     audio: UploadFile = File(...),
 ) -> dict[str, object]:
+    if TTS_SERVICE != "openvoice":
+        raise HTTPException(
+            status_code=409,
+            detail="Voice cloning is unavailable while TTS_SERVICE=melotts",
+        )
     content = await audio.read(50 * 1024 * 1024 + 1)
     await audio.close()
     if not content:
@@ -301,7 +316,7 @@ async def create_cloned_voice(
     if len(content) > 50 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="audio exceeds the 50 MB limit")
     response = await app.state.http.post(
-        f"{OPENVOICE_URL}/v1/voices/clone",
+        f"{TTS_URL}/v1/voices/clone",
         data={"name": name},
         files={
             "audio": (
@@ -345,11 +360,11 @@ async def voice_preview(voice_id: str) -> Response:
         status = exc.response.status_code
         raise HTTPException(
             status_code=status if 400 <= status < 500 else 502,
-            detail="OpenVoice preview is unavailable",
+            detail=f"{TTS_SERVICE} preview is unavailable",
         ) from exc
     except (RuntimeError, TypeError, ValueError) as exc:
         raise HTTPException(
-            status_code=502, detail=f"OpenVoice preview failed: {exc}"
+            status_code=502, detail=f"{TTS_SERVICE} preview failed: {exc}"
         ) from exc
     return Response(
         content=_wav_from_pcm(pcm),
@@ -368,26 +383,33 @@ async def stream_speech_chunks(
     voice_id = request.voice_id or request.speaker or DEFAULT_VOICE_ID
     if voice_id in LEGACY_VOICE_IDS:
         voice_id = DEFAULT_VOICE_ID
+    data: dict[str, str | float | int] = {
+        "tts_text": text,
+        "language": request.language.lower(),
+        "speed": request.speed,
+        "output_sample_rate": 16000,
+    }
+    if TTS_SERVICE == "openvoice":
+        endpoint = "/v1/voice-clone"
+        data.update({
+            "speaker_id": voice_id,
+            "stream": str(request.speed == 1.0).lower(),
+        })
+    else:
+        endpoint = "/v1/tts"
     async with app_.state.http.stream(
         "POST",
-        f"{OPENVOICE_URL}/v1/voice-clone",
-        data={
-            "tts_text": text,
-            "speaker_id": voice_id,
-            "language": request.language.lower(),
-            "stream": str(request.speed == 1.0).lower(),
-            "speed": request.speed,
-            "output_sample_rate": 16000,
-        },
+        f"{TTS_URL}{endpoint}",
+        data=data,
     ) as response:
         if response.is_error:
             await response.aread()
         response.raise_for_status()
         if response.headers.get("X-Audio-Sample-Format") != "s16le":
-            raise RuntimeError("OpenVoice returned an unsupported audio format")
+            raise RuntimeError(f"{TTS_SERVICE} returned an unsupported audio format")
         source_rate = int(response.headers.get("X-Audio-Sample-Rate", "0"))
         if source_rate <= 0:
-            raise RuntimeError("OpenVoice did not report its sample rate")
+            raise RuntimeError(f"{TTS_SERVICE} did not report its sample rate")
         first_chunk_bytes = max(
             2,
             round(
@@ -441,7 +463,7 @@ async def stream_speech_chunks(
                 reserve_bytes = min_tail_bytes
 
         if len(pending) % 2:
-            raise RuntimeError("OpenVoice returned invalid PCM audio")
+            raise RuntimeError(f"{TTS_SERVICE} returned invalid PCM audio")
         if pending:
             yield emit_chunk(bytes(pending))
 
@@ -455,7 +477,7 @@ async def synthesize_speech(
         chunks.append(pcm)
         duration += chunk_duration
     if not chunks:
-        raise RuntimeError("OpenVoice returned empty PCM audio")
+        raise RuntimeError(f"{TTS_SERVICE} returned empty PCM audio")
     return b"".join(chunks), duration
 
 
@@ -556,7 +578,7 @@ async def _synthesize_units(
             duration += chunk_duration
             chunks += 1
         if chunks == 0:
-            raise RuntimeError("OpenVoice returned empty PCM audio")
+            raise RuntimeError(f"{TTS_SERVICE} returned empty PCM audio")
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         await sender.send_json(
             {

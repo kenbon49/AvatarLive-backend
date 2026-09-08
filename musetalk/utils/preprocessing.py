@@ -6,6 +6,35 @@ import cv2
 import pickle
 import os
 import json
+import importlib
+from importlib.machinery import ModuleSpec
+import sys
+import types
+
+
+class _UnavailableMMCVExtension(types.ModuleType):
+    def __getattr__(self, name):
+        if name.startswith('__'):
+            raise AttributeError(name)
+
+        def unavailable(*args, **kwargs):
+            raise RuntimeError(
+                f'mmcv native operation {name!r} is unavailable in this runtime'
+            )
+
+        return unavailable
+
+
+# RTMPose uses mmcv.cnn only, while mmdet eagerly imports unrelated native ops.
+try:
+    importlib.import_module('mmcv._ext')
+except ModuleNotFoundError as exc:
+    if exc.name != 'mmcv._ext':
+        raise
+    extension = _UnavailableMMCVExtension('mmcv._ext')
+    extension.__spec__ = ModuleSpec('mmcv._ext', loader=None)
+    sys.modules['mmcv._ext'] = extension
+
 from mmpose.apis import inference_topdown, init_model
 from mmpose.structures import merge_data_samples
 import torch
@@ -15,7 +44,23 @@ from tqdm import tqdm
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 config_file = './musetalk/utils/dwpose/rtmpose-l_8xb32-270e_coco-ubody-wholebody-384x288.py'
 checkpoint_file = './models/dwpose/dw-ll_ucoco_384.pth'
-model = init_model(config_file, checkpoint_file, device=device)
+
+
+def _load_pose_model():
+    original_torch_load = torch.load
+
+    def load_legacy_checkpoint(*args, **kwargs):
+        kwargs.setdefault('weights_only', False)
+        return original_torch_load(*args, **kwargs)
+
+    torch.load = load_legacy_checkpoint
+    try:
+        return init_model(config_file, checkpoint_file, device=device)
+    finally:
+        torch.load = original_torch_load
+
+
+model = _load_pose_model()
 
 # maker if the bbox is not sufficient 
 coord_placeholder = (0.0,0.0,0.0,0.0)

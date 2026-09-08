@@ -21,10 +21,24 @@ auxiliary_dir = Path(__file__).resolve().parent.parent / 'checkpoints' / 'auxili
 
 @lru_cache
 def get_local_vad_model():
-    model_path = auxiliary_dir / 'silero_vad.onnx'
-    if not model_path.is_file():
-        raise FileNotFoundError(f'Missing local VAD model: {model_path}')
-    return faster_whisper_vad.SileroVADModel(str(model_path))
+    packaged_dir = Path(faster_whisper_vad.__file__).resolve().parent / 'assets'
+    local_encoder = auxiliary_dir / 'silero_encoder_v5.onnx'
+    local_decoder = auxiliary_dir / 'silero_decoder_v5.onnx'
+    packaged_encoder = packaged_dir / 'silero_encoder_v5.onnx'
+    packaged_decoder = packaged_dir / 'silero_decoder_v5.onnx'
+    if local_encoder.is_file() and local_decoder.is_file():
+        encoder_path, decoder_path = local_encoder, local_decoder
+    else:
+        encoder_path, decoder_path = packaged_encoder, packaged_decoder
+    if not encoder_path.is_file() or not decoder_path.is_file():
+        raise FileNotFoundError(
+            'Missing VAD models: checked '
+            f'{local_encoder}, {local_decoder}, {packaged_encoder}, and '
+            f'{packaged_decoder}'
+        )
+    return faster_whisper_vad.SileroVADModel(
+        str(encoder_path), str(decoder_path)
+    )
 
 
 # faster-whisper's VAD helper otherwise resolves its model from site-packages.
@@ -169,4 +183,3 @@ def get_se(audio_path, vc_model, target_dir='processed', vad=True):
         raise NotImplementedError('No audio segments found!')
     
     return vc_model.extract_se(audio_segs, se_save_path=se_path), audio_name
-

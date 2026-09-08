@@ -1,4 +1,4 @@
-# LLM + OpenVoice + MuseTalk 流式总服务
+# LLM + MeloTTS/OpenVoice + MuseTalk 流式总服务
 
 `server_total` 将三个服务组成有背压的端到端流水线：
 
@@ -6,7 +6,7 @@
 LiteLLM token 流
   -> answer 正文增量
   -> 逐标点 text_unit
-  -> 每个单元调用 OpenVoice 克隆音色
+  -> 每个单元调用配置的 TTS（默认直接使用 MeloTTS）
   -> 每个 PCM 单元独立提交 MuseTalk
   -> 连续时间轴的 PCM/JPEG 媒体包
 ```
@@ -23,10 +23,10 @@ docker compose -f docker-compose.dev.yml up --build
 三个容器分别为：
 
 - `musetalk_dev`：GPU 数字人流式推理，内部端口 `8083`。
-- `openvoice_dev`：OpenVoice V2 常驻语音合成和克隆音色，内部端口 `8084`。
+- `tts_dev`：TTS 常驻服务，默认使用 MeloTTS，内部端口 `8084`。
 - `server_total_dev`：流式编排 API，宿主机端口 `8080`。
 
-`server_total` 按每个请求的 `voice_id` 调用 OpenVoice，并把 PCM 统一转换为
+`server_total` 调用 `TTS_SERVICE` 选择的语音服务，并把 PCM 统一转换为
 16 kHz 后继续原有的逐标点流式管线。MuseTalk 流式服务也只使用 PyTorch：Whisper Encoder、UNet
 和 VAE 直接加载仓库中的 `.pth`/`.bin` 等原生权重。聚合服务会校验 MuseTalk WebSocket
 握手中的 `backend=torch`，防止连接到其他推理后端。运行服务不需要模型导出步骤，也不
@@ -62,8 +62,8 @@ WS   ws://localhost:8080/v1/conversation
 }
 ```
 
-`GET /v1/voices` 将 OpenVoice 的 speaker 目录规范化为 `voices`，返回默认音色和已经
-保存的用户克隆音色。旧版 Web 使用的预设音色 ID 会兼容映射到 `default`。上传新的克隆音色：
+`GET /v1/voices` 将当前 TTS 的 speaker 目录规范化为 `voices`。MeloTTS 模式只返回
+内置音色；`TTS_SERVICE=openvoice` 时才支持上传和使用克隆音色：
 
 ```bash
 curl -F "name=我的音色" -F "audio=@reference.wav" http://localhost:8080/v1/voices/clone

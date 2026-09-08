@@ -8,6 +8,11 @@ from einops import rearrange
 from transformers import AutoFeatureExtractor
 
 
+def frame_count_from_samples(sample_count, fps, sample_rate=16000):
+    """Return complete frames without floating-point boundary errors."""
+    return int(sample_count) * int(fps) // int(sample_rate)
+
+
 class AudioProcessor:
     def __init__(self, feature_extractor_path="openai/whisper-tiny/"):
         self.feature_extractor = AutoFeatureExtractor.from_pretrained(feature_extractor_path)
@@ -60,8 +65,8 @@ class AudioProcessor:
         audio_fps = 50
         fps = int(fps)
         whisper_idx_multiplier = audio_fps / fps
-        num_frames = math.floor((librosa_length / sr) * fps)
-        actual_length = math.floor((librosa_length / sr) * audio_fps)
+        num_frames = frame_count_from_samples(librosa_length, fps, sr)
+        actual_length = frame_count_from_samples(librosa_length, audio_fps, sr)
         whisper_feature = whisper_feature[:,:actual_length,...]  # 去掉填充部分的音频特征
 
         # Calculate padding amount
@@ -99,4 +104,3 @@ if __name__ == "__main__":
     audio_feature, librosa_feature_length = audio_processor.get_audio_feature(wav_path)
     print("Audio Feature shape:", audio_feature.shape)
     print("librosa_feature_length:", librosa_feature_length)
-

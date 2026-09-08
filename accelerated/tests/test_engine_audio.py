@@ -9,6 +9,7 @@ import unittest
 import numpy as np
 
 from accelerated.engine import MuseTalkEngine
+from musetalk.utils.audio_processor import frame_count_from_samples
 
 
 class FakeFeatureTensor:
@@ -81,6 +82,9 @@ def make_engine(processor: FakeAudioProcessor) -> MuseTalkEngine:
 
 
 class EngineAudioTests(unittest.TestCase):
+    def test_exact_frame_boundary_uses_integer_arithmetic(self):
+        self.assertEqual(frame_count_from_samples(18_560, 25), 29)
+
     def test_short_single_frame_audio_is_padded_only_for_whisper(self):
         processor = FakeAudioProcessor()
         engine = make_engine(processor)

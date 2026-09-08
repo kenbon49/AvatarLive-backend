@@ -1,51 +1,92 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Set the checkpoints directory
-CheckpointsDir="models"
+endpoint="${HF_ENDPOINT:-https://hf-mirror.com}"
+root="models"
 
-# Create necessary directories
-mkdir -p models/musetalk models/musetalkV15 models/syncnet models/dwpose models/face-parse-bisent models/sd-vae models/whisper
+download_file() {
+  local repo="$1"
+  local source="$2"
+  local destination="$3"
+  local destination_dir
+  local destination_name
 
-# Install required packages
-pip install -U "huggingface_hub[cli]"
-pip install gdown
+  destination_dir="$(dirname "$destination")"
+  destination_name="$(basename "$destination")"
+  mkdir -p "$destination_dir"
 
-# Set HuggingFace mirror endpoint
-export HF_ENDPOINT=https://hf-mirror.com
+  if command -v aria2c >/dev/null; then
+    aria2c \
+      --continue=true \
+      --max-connection-per-server=16 \
+      --split=16 \
+      --min-split-size=4M \
+      --file-allocation=none \
+      --auto-file-renaming=false \
+      --allow-overwrite=true \
+      --max-tries=0 \
+      --retry-wait=5 \
+      --timeout=120 \
+      --connect-timeout=30 \
+      --console-log-level=warn \
+      --show-console-readout=false \
+      --summary-interval=30 \
+      --dir="$destination_dir" \
+      --out="$destination_name" \
+      "$endpoint/$repo/resolve/main/$source?download=true"
+    return
+  fi
 
-# Download MuseTalk V1.0 weights
-huggingface-cli download TMElyralab/MuseTalk \
-  --local-dir $CheckpointsDir \
-  --include "musetalk/musetalk.json" "musetalk/pytorch_model.bin"
+  curl \
+    --fail \
+    --location \
+    --continue-at - \
+    --retry 100 \
+    --retry-all-errors \
+    --retry-delay 5 \
+    --output "$destination" \
+    "$endpoint/$repo/resolve/main/$source?download=true"
+}
 
-# Download MuseTalk V1.5 weights (unet.pth)
-huggingface-cli download TMElyralab/MuseTalk \
-  --local-dir $CheckpointsDir \
-  --include "musetalkV15/musetalk.json" "musetalkV15/unet.pth"
+download_group() {
+  while (( "$#" )); do
+    download_file "$1" "$2" "$3"
+    shift 3
+  done
+}
 
-# Download SD VAE weights
-huggingface-cli download stabilityai/sd-vae-ft-mse \
-  --local-dir $CheckpointsDir/sd-vae \
-  --include "config.json" "diffusion_pytorch_model.bin"
+downloads=(
+  TMElyralab/MuseTalk musetalkV15/musetalk.json "$root/musetalkV15/musetalk.json"
+  stabilityai/sd-vae-ft-mse config.json "$root/sd-vae/config.json"
+  stabilityai/sd-vae-ft-mse diffusion_pytorch_model.bin "$root/sd-vae/diffusion_pytorch_model.bin"
+  openai/whisper-tiny config.json "$root/whisper/config.json"
+  openai/whisper-tiny pytorch_model.bin "$root/whisper/pytorch_model.bin"
+  openai/whisper-tiny preprocessor_config.json "$root/whisper/preprocessor_config.json"
+  yzd-v/DWPose dw-ll_ucoco_384.pth "$root/dwpose/dw-ll_ucoco_384.pth"
+)
+if [[ "${MUSETALK_SKIP_UNET:-0}" != "1" ]]; then
+  downloads+=(
+    TMElyralab/MuseTalk musetalkV15/unet.pth "$root/musetalkV15/unet.pth"
+  )
+fi
+download_group "${downloads[@]}"
 
-# Download Whisper weights
-huggingface-cli download openai/whisper-tiny \
-  --local-dir $CheckpointsDir/whisper \
-  --include "config.json" "pytorch_model.bin" "preprocessor_config.json"
+if [[ ! -s "$root/face-parse-bisent/79999_iter.pth" ]]; then
+  command -v gdown >/dev/null || { echo "gdown is required" >&2; exit 1; }
+  mkdir -p "$root/face-parse-bisent"
+  gdown --continue 154JgKpzCPW82qINcVieuPH3fZ2e0P812 \
+    -O "$root/face-parse-bisent/79999_iter.pth"
+fi
 
-# Download DWPose weights
-huggingface-cli download yzd-v/DWPose \
-  --local-dir $CheckpointsDir/dwpose \
-  --include "dw-ll_ucoco_384.pth"
+if [[ ! -s "$root/face-parse-bisent/resnet18-5c106cde.pth" ]]; then
+  curl \
+    --fail \
+    --location \
+    --retry 100 \
+    --retry-all-errors \
+    --retry-delay 5 \
+    --output "$root/face-parse-bisent/resnet18-5c106cde.pth" \
+    https://download.pytorch.org/models/resnet18-5c106cde.pth
+fi
 
-# Download SyncNet weights
-huggingface-cli download ByteDance/LatentSync \
-  --local-dir $CheckpointsDir/syncnet \
-  --include "latentsync_syncnet.pt"
-
-# Download Face Parse Bisent weights
-gdown --id 154JgKpzCPW82qINcVieuPH3fZ2e0P812 -O $CheckpointsDir/face-parse-bisent/79999_iter.pth
-curl -L https://download.pytorch.org/models/resnet18-5c106cde.pth \
-  -o $CheckpointsDir/face-parse-bisent/resnet18-5c106cde.pth
-
-echo "✅ All weights have been downloaded successfully!" 
+echo "All MuseTalk runtime weights have been downloaded successfully."

@@ -141,13 +141,12 @@ def media_packet(
 
 
 class PipelineTests(unittest.IsolatedAsyncioTestCase):
-    async def test_normalizes_openvoice_speaker_catalog_for_web_clients(self):
+    async def test_normalizes_melotts_speaker_catalog_for_web_clients(self):
         response = FakeCatalogResponse(
             {
                 "default": "default",
                 "speakers": [
                     {"id": "default", "name": "Default voice", "default": True},
-                    {"id": "custom-voice", "name": "Custom voice", "default": False},
                 ],
             }
         )
@@ -164,17 +163,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                     "name": "Default voice",
                     "kind": "preset",
                     "source": {
-                        "provider": "OpenVoice",
+                        "provider": "MeloTTS",
                         "sample_url": "/v1/voices/default/preview",
-                    },
-                },
-                {
-                    "voice_id": "custom-voice",
-                    "name": "Custom voice",
-                    "kind": "clone",
-                    "source": {
-                        "provider": "OpenVoice",
-                        "sample_url": "/v1/voices/custom-voice/preview",
                     },
                 },
             ],
@@ -298,10 +288,10 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         pcm, duration = await synthesize_speech(fake_app, request, "简短回答")
         self.assertEqual(pcm, FakeHttpResponse.content)
         self.assertEqual(duration, 0.125)
-        self.assertEqual(http.request[1]["data"]["speaker_id"], "default")
+        self.assertTrue(http.request[0].endswith("/v1/tts"))
+        self.assertNotIn("speaker_id", http.request[1]["data"])
         self.assertEqual(http.request[1]["data"]["language"], "zh")
         self.assertEqual(http.request[1]["data"]["tts_text"], "简短回答")
-        self.assertEqual(http.request[1]["data"]["stream"], "true")
         self.assertEqual(http.request[1]["data"]["output_sample_rate"], 16000)
 
     async def test_streaming_uses_a_short_first_chunk_then_larger_chunks(self):
@@ -337,7 +327,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             [duration for _pcm, duration in chunks], [0.5, 1.0, 0.25]
         )
 
-    async def test_synthesize_resamples_pcm_and_migrates_legacy_voice_id(self):
+    async def test_synthesize_resamples_melotts_pcm_and_ignores_legacy_voice_id(self):
         class NativeRateResponse(FakeHttpResponse):
             content = bytes(4800)
             headers = {
@@ -362,11 +352,9 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(pcm), 3200)
         self.assertEqual(duration, 0.1)
-        self.assertEqual(
-            http.request[1]["data"]["speaker_id"], "default"
-        )
+        self.assertNotIn("speaker_id", http.request[1]["data"])
 
-    async def test_synthesize_forwards_registered_clone_voice_id(self):
+    async def test_openvoice_switch_forwards_registered_clone_voice_id(self):
         http = FakeHttpClient()
         fake_app = SimpleNamespace(state=SimpleNamespace(http=http))
         request = AskRequest(
@@ -375,8 +363,10 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             voice_id="my-cloned-voice",
         )
 
-        await synthesize_speech(fake_app, request, "克隆音色测试")
+        with patch("server_total.app.TTS_SERVICE", "openvoice"):
+            await synthesize_speech(fake_app, request, "克隆音色测试")
 
+        self.assertTrue(http.request[0].endswith("/v1/voice-clone"))
         self.assertEqual(http.request[1]["data"]["speaker_id"], "my-cloned-voice")
 
     async def test_pipeline_streams_each_text_unit_through_tts_and_musetalk(self):

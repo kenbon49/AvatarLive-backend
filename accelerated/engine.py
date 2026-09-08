@@ -122,7 +122,7 @@ class MuseTalkEngine:
         self.torch = torch
         self.device = torch.device(self.device_name)
         # Fixed 256x256 batches are faster and avoid multi-second first-shape
-        # autotune stalls on RTX 3090 with the current CUDA/PyTorch stack.
+        # autotune stalls with the current CUDA/PyTorch stack.
         torch.backends.cudnn.benchmark = False
         torch.backends.cuda.matmul.allow_tf32 = self.allow_tf32
         torch.backends.cudnn.allow_tf32 = self.allow_tf32

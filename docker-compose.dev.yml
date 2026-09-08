@@ -1,13 +1,13 @@
 # 开发环境配置 - 支持代码热更新
 services:
-  # OpenVoice 常驻模型并提供零样本音色克隆。
-  openvoice-dev:
+  # TTS 常驻服务；默认直接用 MeloTTS，可通过 TTS_SERVICE=openvoice 回切。
+  tts-dev:
     build:
       context: .
       dockerfile: OpenVoice/Dockerfile
 
-    container_name: openvoice_dev
-    image: openvoice:dev
+    container_name: tts_dev
+    image: avatarlive-tts:dev
 
     ports:
       - "8084:8084"
@@ -21,6 +21,9 @@ services:
       - HF_HUB_OFFLINE=1
       - TRANSFORMERS_OFFLINE=1
       - CUDA_VISIBLE_DEVICES=0
+      - TTS_SERVICE=${TTS_SERVICE:-melotts}
+      - TTS_DEFAULT_VOICE=${TTS_DEFAULT_VOICE:-default}
+      - MELOTTS_DEVICE=${MELOTTS_DEVICE:-cuda:0}
       - OPENVOICE_DEVICE=${OPENVOICE_DEVICE:-cuda:0}
       - OPENVOICE_DEFAULT_VOICE=${OPENVOICE_DEFAULT_VOICE:-default}
       - OPENVOICE_DEFAULT_REFERENCE=/app/data/input/audio/yongen.wav
@@ -33,7 +36,7 @@ services:
               count: 1
               capabilities: [gpu]
 
-    command: python server.py --host 0.0.0.0 --port 8084
+    command: python3 start_tts.py --host 0.0.0.0 --port 8084
     restart: "no"
 
     healthcheck:
@@ -46,7 +49,7 @@ services:
     networks:
       - musetalk_network
 
-  # 轻量网关负责 LLM -> OpenVoice -> MuseTalk，不加载推理模型。
+  # 轻量网关负责 LLM -> TTS -> MuseTalk，不加载推理模型。
   musetalk-dev:
     build:
       context: .
@@ -122,8 +125,9 @@ services:
 
     environment:
       - PYTHONUNBUFFERED=1
-      - OPENVOICE_URL=http://openvoice-dev:8084
-      - OPENVOICE_DEFAULT_VOICE=${OPENVOICE_DEFAULT_VOICE:-default}
+      - TTS_SERVICE=${TTS_SERVICE:-melotts}
+      - TTS_URL=http://tts-dev:8084
+      - TTS_DEFAULT_VOICE=${TTS_DEFAULT_VOICE:-default}
       - MUSETALK_WS_URL=ws://musetalk-dev:8083/v1/stream
       - PIPELINE_REQUEST_TIMEOUT=${PIPELINE_REQUEST_TIMEOUT:-300}
       - PIPELINE_FIRST_UNIT_MIN_CHARS=${PIPELINE_FIRST_UNIT_MIN_CHARS:-1}
@@ -139,7 +143,7 @@ services:
     depends_on:
       musetalk-dev:
         condition: service_healthy
-      openvoice-dev:
+      tts-dev:
         condition: service_healthy
     restart: "no"
 
