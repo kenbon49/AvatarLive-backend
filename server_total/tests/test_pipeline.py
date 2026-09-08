@@ -369,7 +369,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(http.request[0].endswith("/v1/voice-clone"))
         self.assertEqual(http.request[1]["data"]["speaker_id"], "my-cloned-voice")
 
-    async def test_pipeline_streams_each_text_unit_through_tts_and_musetalk(self):
+    async def test_pipeline_submits_each_melotts_text_unit_once_to_musetalk(self):
         upstream = FakeUpstream(
             [
                 '{"type":"ready","fps":25,"backend":"torch","inference_dtype":"float32"}',
@@ -377,11 +377,6 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 '{"type":"queued","profile":"business_male_1"}',
                 '{"type":"stream_start"}',
                 media_packet(4, 0, b"first"),
-                '{"type":"stream_end","packets":1}',
-                '{"type":"started","profile":"business_male_1"}',
-                '{"type":"queued","profile":"business_male_1"}',
-                '{"type":"stream_start"}',
-                media_packet(6, 10_000, b"first-cont"),
                 '{"type":"stream_end","packets":1}',
                 '{"type":"started","profile":"business_male_1"}',
                 '{"type":"queued","profile":"business_male_1"}',
@@ -445,28 +440,26 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             next_message = frontend.json_messages[text_index + 1]
             self.assertEqual(next_message["type"], "stream_start")
             self.assertEqual(next_message["segment_seq"], text_unit["seq"])
-        self.assertEqual(len(frontend.binary_messages), 3)
+        self.assertEqual(len(frontend.binary_messages), 2)
         ready = next(
             item for item in frontend.json_messages if item["type"] == "musetalk_ready"
         )
         self.assertEqual(ready["backend"], "torch")
         self.assertEqual(ready["inference_dtype"], "float32")
         first = PACKET_HEADER.unpack_from(frontend.binary_messages[0])
-        first_cont = PACKET_HEADER.unpack_from(frontend.binary_messages[1])
-        second = PACKET_HEADER.unpack_from(frontend.binary_messages[2])
+        second = PACKET_HEADER.unpack_from(frontend.binary_messages[1])
         self.assertEqual((first[4], first[6]), (0, 0))
-        self.assertEqual((first_cont[4], first_cont[6]), (1, 110_000))
-        self.assertEqual((second[4], second[6]), (2, 200_000))
+        self.assertEqual((second[4], second[6]), (1, 200_000))
         self.assertEqual(frontend.json_messages[-1]["type"], "conversation_end")
         self.assertEqual(frontend.json_messages[-1]["units"], 2)
         commits = [
             item for item in upstream.sent if isinstance(item, str) and "commit" in item
         ]
-        self.assertEqual(len(commits), 3)
+        self.assertEqual(len(commits), 2)
         starts = [
             item for item in upstream.sent if isinstance(item, str) and "start" in item
         ]
-        self.assertEqual(len(starts), 3)
+        self.assertEqual(len(starts), 2)
         self.assertTrue(all('"profile": "business_male_1"' in item for item in starts))
         parsed_starts = [json.loads(item) for item in starts]
         self.assertTrue(all(item["start_position"] == 13 for item in parsed_starts))

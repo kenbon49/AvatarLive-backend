@@ -132,6 +132,7 @@ def create_app(config: RuntimeConfig | None = None) -> FastAPI:
         # renderer. A fresh start therefore always begins at the source first frame.
         profile_phases: dict[str, float] = {}
         max_audio_bytes = 16000 * 2 * 120
+        owns_gpu = False
         try:
             await websocket.send_json(
                 {
@@ -190,67 +191,69 @@ def create_app(config: RuntimeConfig | None = None) -> FastAPI:
                     pcm = bytes(audio)
                     audio.clear()
                     await websocket.send_json({"type": "queued", "profile": profile_id})
-                    async with gpu_queue:
-                        profile = await asyncio.to_thread(runtime.get_profile, profile_id)
-                        if runtime.renderer is None:
-                            raise RuntimeError("streaming renderer is unavailable")
-                        start_phase = profile_phases.get(profile_id, 0.0)
-                        start_position = math.floor(start_phase)
-                        iterator = runtime.renderer.render(
-                            pcm,
-                            profile,
-                            start_position=start_position,
-                        )
-                        sequence = 0
-                        await websocket.send_json({"type": "stream_start", "profile": profile_id})
-                        pending: asyncio.Task[object] | None = asyncio.create_task(
-                            asyncio.to_thread(_next_or_end, iterator)
-                        )
-                        try:
-                            while True:
-                                batch = await pending
-                                pending = None
-                                if batch is _END:
-                                    break
-                                # Render the next GPU batch while this batch is encoded and sent.
-                                pending = asyncio.create_task(
-                                    asyncio.to_thread(_next_or_end, iterator)
+                    if not owns_gpu:
+                        await gpu_queue.acquire()
+                        owns_gpu = True
+                    profile = await asyncio.to_thread(runtime.get_profile, profile_id)
+                    if runtime.renderer is None:
+                        raise RuntimeError("streaming renderer is unavailable")
+                    start_phase = profile_phases.get(profile_id, 0.0)
+                    start_position = math.floor(start_phase)
+                    iterator = runtime.renderer.render(
+                        pcm,
+                        profile,
+                        start_position=start_position,
+                    )
+                    sequence = 0
+                    await websocket.send_json({"type": "stream_start", "profile": profile_id})
+                    pending: asyncio.Task[object] | None = asyncio.create_task(
+                        asyncio.to_thread(_next_or_end, iterator)
+                    )
+                    try:
+                        while True:
+                            batch = await pending
+                            pending = None
+                            if batch is _END:
+                                break
+                            # Render the next GPU batch while this batch is encoded and sent.
+                            pending = asyncio.create_task(
+                                asyncio.to_thread(_next_or_end, iterator)
+                            )
+                            start_us = round(
+                                batch.start_frame / runtime.config.fps * 1_000_000
+                            )
+                            await websocket.send_bytes(
+                                encode_packet(PACKET_PCM16, sequence, start_us, batch.pcm16)
+                            )
+                            sequence += 1
+                            for offset, frame in enumerate(batch.frames):
+                                frame_number = batch.start_frame + offset
+                                pts_us = round(
+                                    frame_number / runtime.config.fps * 1_000_000
                                 )
-                                start_us = round(
-                                    batch.start_frame / runtime.config.fps * 1_000_000
-                                )
+                                payload = jpeg_bytes(frame, runtime.config.jpeg_quality)
                                 await websocket.send_bytes(
-                                    encode_packet(PACKET_PCM16, sequence, start_us, batch.pcm16)
+                                    encode_packet(PACKET_JPEG, sequence, pts_us, payload)
                                 )
                                 sequence += 1
-                                for offset, frame in enumerate(batch.frames):
-                                    frame_number = batch.start_frame + offset
-                                    pts_us = round(
-                                        frame_number / runtime.config.fps * 1_000_000
-                                    )
-                                    payload = jpeg_bytes(frame, runtime.config.jpeg_quality)
-                                    await websocket.send_bytes(
-                                        encode_packet(PACKET_JPEG, sequence, pts_us, payload)
-                                    )
-                                    sequence += 1
-                        finally:
-                            # A disconnect must not release the GPU lock while the prefetched
-                            # batch is still using the shared inference session.
-                            if pending is not None:
-                                try:
-                                    await asyncio.shield(pending)
-                                except Exception:
-                                    log.exception("prefetched render batch failed during cleanup")
-                            iterator.close()
-                            profile_phases[profile_id] = _advance_profile_phase(
-                                start_phase,
-                                len(pcm),
-                                runtime.config.fps,
-                                profile.cycle_length,
-                            )
-                        await websocket.send_json(
-                            {"type": "stream_end", "packets": sequence, "profile": profile_id}
+                    finally:
+                        # A disconnect must not release the GPU lock while the prefetched
+                        # batch is still using the shared inference session.
+                        if pending is not None:
+                            try:
+                                await asyncio.shield(pending)
+                            except Exception:
+                                log.exception("prefetched render batch failed during cleanup")
+                        iterator.close()
+                        profile_phases[profile_id] = _advance_profile_phase(
+                            start_phase,
+                            len(pcm),
+                            runtime.config.fps,
+                            profile.cycle_length,
                         )
+                    await websocket.send_json(
+                        {"type": "stream_end", "packets": sequence, "profile": profile_id}
+                    )
         except WebSocketDisconnect:
             return
         except Exception as exc:
@@ -261,6 +264,9 @@ def create_app(config: RuntimeConfig | None = None) -> FastAPI:
                 )
             except Exception:
                 pass
+        finally:
+            if owns_gpu:
+                gpu_queue.release()
 
     return app
 

@@ -562,21 +562,29 @@ async def _synthesize_units(
         )
         duration = 0.0
         chunks = 0
-        async for pcm, chunk_duration in stream_speech_chunks(
-            app,
-            request,
-            item.text,
-            first_chunk_seconds=(
-                TTS_STREAM_CHUNK_SECONDS
-                if count == 0
-                else TTS_STREAM_STEADY_CHUNK_SECONDS
-            ),
-        ):
+        if TTS_SERVICE == "melotts":
+            pcm, chunk_duration = await synthesize_speech(app, request, item.text)
             await audio_queue.put(
-                AudioUnit(item, pcm, chunk_duration, chunk_index=chunks)
+                AudioUnit(item, pcm, chunk_duration, chunk_index=0)
             )
             duration += chunk_duration
-            chunks += 1
+            chunks = 1
+        else:
+            async for pcm, chunk_duration in stream_speech_chunks(
+                app,
+                request,
+                item.text,
+                first_chunk_seconds=(
+                    TTS_STREAM_CHUNK_SECONDS
+                    if count == 0
+                    else TTS_STREAM_STEADY_CHUNK_SECONDS
+                ),
+            ):
+                await audio_queue.put(
+                    AudioUnit(item, pcm, chunk_duration, chunk_index=chunks)
+                )
+                duration += chunk_duration
+                chunks += 1
         if chunks == 0:
             raise RuntimeError(f"{TTS_SERVICE} returned empty PCM audio")
         elapsed_ms = round((time.perf_counter() - started) * 1000)
